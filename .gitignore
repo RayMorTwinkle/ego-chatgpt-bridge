@@ -6,8 +6,8 @@ runtime/
 dist/
 reference/
 /runtime
-/runtime*/
-evidence/
+/runtime*
+/evidence
 .env
 .env.*
 !.env.example
