@@ -1,0 +1,13 @@
+{
+  "host": "10.126.126.11",
+  "port": 8766,
+  "allowed_hosts": ["10.126.126.11"],
+  "allowed_client_cidrs": ["10.126.126.0/24"],
+  "space_id": 1,
+  "space_name": "ego-research-runtime",
+  "project_id": "REPLACE_WITH_VERIFIED_PROJECT_ID",
+  "project_name": "Ego Research Workspace",
+  "expected_account": "REPLACE_WITH_ACCOUNT_DISPLAY_NAME",
+  "default_owner": "default",
+  "max_active": 2
+}
