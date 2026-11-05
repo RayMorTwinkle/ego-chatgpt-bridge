@@ -28,6 +28,8 @@ class Service:
         self.worker = None
         self.wake = asyncio.Event()
         self.control = asyncio.Lock()
+        self.last_health_probe = None
+        self.last_verified_page = None
         self.last_worker_error = None
 
     async def start(self):
@@ -51,11 +53,41 @@ class Service:
             'client_local_browser_cli_required':False,'management_ui_url':self.settings.base_url+'/ui/',
             'note':'浏览器由桥接服务器托管。空间编号只在服务端 Ego 实例有效，不能用客户端本机 ego-browser 据此查找。'}
 
+    def health_dimensions(self):
+        return {'probe':self.last_health_probe,'worker':{'running':bool(self.worker and not self.worker.done()),'last_error':self.last_worker_error},
+            'submission_blocked_by_probe':False,'submission_validation':'each_request_independently',
+            'last_verified_request_page':self.last_verified_page}
+
+    @staticmethod
+    def result_cursor(op, artifacts):
+        result=op.get('result') or {}
+        value={'message_id':op['id'],'status':op['status'],'error':op['error'],
+            'result':{key:result.get(key) for key in ('content','markdown','sources','external_images','completeness_signal','extraction_stable','generation_done','delivery_phase')},
+            'artifacts':artifacts}
+        return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+
+    async def wait_query(self,owner,args):
+        timeout=args.get('timeout_seconds',25)
+        if not isinstance(timeout,(int,float)) or not 0<=timeout<=30:
+            raise BridgeError('INVALID_ARGUMENT','timeout_seconds 需要为 0..30。')
+        # Pin latest operation at entry; a concurrent continuation must not retarget a wait.
+        self.store.query(owner,args.get('query_id'))
+        op=self.store.operation(args['message_id']) if args.get('message_id') else self.store.latest(owner,args['query_id'])
+        request={**args,'message_id':op['id'],'compact':True,'include_outputs':False,'include_content':args.get('include_content',False)}
+        deadline=asyncio.get_running_loop().time()+timeout
+        while True:
+            value=await self._dispatch(owner,'get_query_result',request)
+            changed=value['cursor']!=args.get('cursor')
+            if changed or asyncio.get_running_loop().time()>=deadline or value['status'] in TERMINAL:
+                if not changed:value.pop('result',None)
+                return {**value,'changed':changed,'snapshot_mode':'replace','timed_out':not changed and value['status'] not in TERMINAL}
+            await asyncio.sleep(min(.25,max(0,deadline-asyncio.get_running_loop().time())))
+
     def next_action(self,op):
         args={'query_id':op['query_id'],'message_id':op['id']}
         state=op['status'];error=op.get('error') or {}
         if state in {'QUEUED','PREPARING','SUBMITTING','WAITING_FOR_RESPONSE','GENERATING'}:
-            return {'tool':'get_query_result','arguments':args,'wait_seconds':5,'do_not_resend':True,
+            return {'tool':'wait_query','arguments':{**args,'timeout_seconds':25},'wait_seconds':0,'do_not_resend':True,
                 'note':'回答可能分段增长；complete=false 时继续等待，已有 result.content 可读但不是最终结果。'}
         if state=='OUTCOME_UNKNOWN' or state=='NEEDS_ATTENTION' and op['submitted_at'] is not None:
             tool='collect_artifacts' if error.get('error_code')=='ARTIFACT_CAPTURE_FAILED' else 'recover_session'
@@ -87,13 +119,19 @@ class Service:
             result={"ok": False, "error": e.data,"execution_context":self.execution_context()}
             if tool=='health_check':
                 e.data['recovery_suggestion']='health_check是可选浏览器诊断。可用diagnose检查worker，已有请求按原Query ID等待/恢复；发送前会独立核验，不要据此在客户端重建空间或重发。'
-                result.update(health_check_is_advisory=True,service_available=True,
+                self.last_health_probe={'ok':False,'at':now(),'page_label':e.data.get('diagnostic_context',{}).get('page_label'),'error_code':e.data['error_code']}
+                e.data['action_scope']='health_probe_only'
+                if 'TIMEOUT' in e.data['error_code'] or 'TIMED_OUT' in e.data['error_code'] or e.data['error_code'] in {'EGO_PAGE_UNRESPONSIVE','TAB_MISSING'}:
+                    e.data.update(user_action_required=False,safe_to_retry=True)
+                result.update(health_check_is_advisory=True,service_available=True,availability_scope='http_api_only',health=self.health_dimensions(),
                     guidance='健康检查是可选诊断，不是请求准入门槛；发送前会独立核验。不要高频重试健康检查，也不要重发已有请求。')
             return result
         except (TypeError, ValueError, KeyError) as e:
             return {"ok": False, "error": BridgeError("INVALID_ARGUMENT", "参数格式不正确。", context={"type": type(e).__name__}).data}
 
     async def _dispatch(self, owner: str, tool: str, args: dict) -> dict:
+        if tool == 'wait_query':
+            return await self.wait_query(owner,args)
         if tool == 'get_artifact':
             return {'ok':True,'artifact':self.artifacts.public(self.artifacts.get(owner,args.get('artifact_id')))}
         if tool in {"create_query", "continue_query"}:
@@ -114,6 +152,9 @@ class Service:
             if tool == "continue_query" and not qid:
                 raise BridgeError("INVALID_ARGUMENT", "continue_query 需要 query_id。")
             payload = dict(text=text, effort=effort, soft_timeout=soft, hard_timeout=hard)
+            context_mode=args.get('context_mode','project')
+            if context_mode not in {'project','request_only_best_effort'}:raise BridgeError('INVALID_ARGUMENT','context_mode 必须为 project 或 request_only_best_effort。')
+            if context_mode!='project':payload['context_mode']=context_mode
             op = self.store.enqueue(owner, request, payload, self.settings.project_id, self.settings.space_id, qid)
             self.wake.set()
             return {"ok": True, **self.view(op)}
@@ -126,10 +167,11 @@ class Service:
         if tool == "health_check":
             async with self.control:
                 health = await self.adapter.call("health")
-            return {"ok": True, "runtime": health, "active_operations": len(self.store.active()), "worker_error": self.last_worker_error,"health_check_is_advisory":True,"execution_context":self.execution_context()}
+            self.last_health_probe={'ok':bool(health.get('healthy')),'at':now(),'page_label':health.get('page_label')}
+            return {"ok": True, "health":self.health_dimensions(), "runtime": health, "active_operations": len(self.store.active()), "worker_error": self.last_worker_error,"health_check_is_advisory":True,"execution_context":self.execution_context()}
         if tool == "diagnose" and not args.get("query_id"):
             return {"ok": True, "worker_running": bool(self.worker and not self.worker.done()), "last_worker_error": self.last_worker_error,
-                    "active_count": len(self.store.active()), "retention": {"policy":self.retention.policy(),"last_run":self.retention.last} if hasattr(self,"retention") else None, "model_policy": "GPT-6 / extra_high, high only", "max_active": self.settings.max_active,"execution_context":self.execution_context()}
+                    "health":self.health_dimensions(),"active_count": len(self.store.active()), "retention": {"policy":self.retention.policy(),"last_run":self.retention.last} if hasattr(self,"retention") else None, "model_policy": "GPT-6 / extra_high, high only", "max_active": self.settings.max_active,"execution_context":self.execution_context()}
         qid = args.get("query_id")
         q = self.store.query(owner, qid)
         op = self.store.operation(args["message_id"]) if args.get("message_id") else self.store.latest(owner, qid)
@@ -141,6 +183,8 @@ class Service:
         if tool == "get_query_result":
             result = dict(op["result"] or {})
             result.pop("history", None)
+            confirmation=result.get("completion_confirmation")
+            if confirmation:result["completion_confirmation"]={k:v for k,v in confirmation.items() if k!="signature"}
             if op['result'] is not None:
                 result['artifacts']=self.artifacts.list(owner,op['id'])
                 if 'outputs' in result:
@@ -150,8 +194,28 @@ class Service:
             if op["result"] is not None:
                 result["delivery_complete"]=delivery_complete
                 if any(a["status"]=="EXPIRED" for a in result.get("artifacts",[])):result["delivery_phase"]="EXPIRED"
-            return {"ok": True, **self.view(op), "generation_complete":generation_complete,"delivery_complete":delivery_complete, "delivery_expired":any(a["status"]=="EXPIRED" for a in result.get("artifacts",[])),
-                    "complete": op["status"] == "COMPLETED" and delivery_complete, "result_is_partial":bool(op["result"] and not generation_complete), "result": result or None}
+            output={"ok": True, **self.view(op), "generation_complete":generation_complete,
+                    "generation_done":result.get('generation_done',generation_complete),"extraction_stable":result.get('extraction_stable'),
+                    "semantic_validation":"not_performed","delivery_complete":delivery_complete,
+                    "delivery_expired":any(a["status"]=="EXPIRED" for a in result.get("artifacts",[])),
+                    "complete":op["status"]=="COMPLETED" and delivery_complete,
+                    "result_is_partial":bool(op["result"] and not generation_complete),
+                    "cursor":self.result_cursor(op,result.get('artifacts',[]))}
+            if output.get('next_action',{} ) and output['next_action']['tool']=='wait_query':
+                output['next_action']['arguments']['cursor']=output['cursor']
+            if args.get('compact',False):
+                output={k:v for k,v in output.items() if k in {'ok','query_id','message_id','status','complete','generation_complete','generation_done','extraction_stable','delivery_complete','delivery_expired','result_is_partial','semantic_validation','cursor','last_error','conversation_id','conversation_url','observed','next_action'}}
+            if args.get('include_content',True):
+                fmt=args.get('content_format','text')
+                if fmt not in {'text','markdown'}:raise BridgeError('INVALID_ARGUMENT','content_format 必须为 text 或 markdown。')
+                markdown=result.pop('markdown',None)
+                if fmt=='markdown' and markdown is not None:result['content']=markdown
+                result['content_format']='markdown' if fmt=='markdown' and markdown is not None else 'text'
+                result['delivered_content_sha256']=hashlib.sha256(result.get('content','').encode()).hexdigest()
+                if not args.get('include_outputs',True):result.pop('outputs',None)
+                elif 'outputs' in result:result['outputs']=self.outputs(result)
+                output['result']=result if op['result'] is not None else None
+            return output
         if tool == 'list_artifacts':
             return {'ok':True,'query_id':qid,'message_id':op['id'],'artifacts':self.artifacts.list(owner,op['id'])}
         if tool == 'collect_artifacts':
@@ -166,6 +230,8 @@ class Service:
                 if len(matches)!=1 or matches[0].get('assistant_id')!=op['result'].get('assistant_message_id'):
                     raise BridgeError('ARTIFACT_ASSOCIATION_FAILED','产物消息身份与原回答不一致。',stage='artifact',action=True)
                 self.store.bind_conversation(qid,q['conversation_url'],q['conversation_id'],self.settings.space_id)
+                if matches[0].get('state')!='complete' or not matches[0].get('render_ready',True) or matches[0].get('generation_active',False):
+                    raise BridgeError('RESPONSE_NOT_COMPLETE','网页目前仍未完成，暂不采集产物。',stage='artifact')
                 result=await self.package_result(self.store.operation(op['id']),matches[0],dict(op['result']))
                 self.store.transition(op['id'],'COMPLETED' if result['delivery_complete'] else op['status'],result=result,
                                       error=None if result['delivery_complete'] else BridgeError('ARTIFACT_CAPTURE_FAILED','至少一个产物尚未拿到有效字节。',stage='artifact',action=True).data)
@@ -220,7 +286,7 @@ class Service:
     def browser_args(self, op):
         q = self.store.query(op["owner"], op["query_id"])
         return dict(page_label=op["page_label"] if q['space_id']==self.settings.space_id else None, conversation_url=None if provisional_conversation(q['conversation_id']) else q["conversation_url"],
-                    send_text=op["payload"]["text"] + f"\n\n[ego-bridge request:{op['id']}]", effort=(op["observed"] or {}).get("effort", op["payload"]["effort"]), baseline=op["baseline"],
+                    send_text=op["payload"]["text"] + ("\n\n研究范围约束：仅依据本条请求及可核验来源作答；不要把项目记忆或其他对话中的偏好、经历和任务当作本次事实。缺失条件请明确说明，勿自行补充个人背景。" if op["payload"].get("context_mode")=="request_only_best_effort" else "") + f"\n\n[ego-bridge request:{op['id']}]", effort=(op["observed"] or {}).get("effort", op["payload"]["effort"]), baseline=op["baseline"],
                     target_user_message_id=(op['result'] or {}).get('user_message_id'),target_assistant_message_id=(op['result'] or {}).get('assistant_message_id'))
 
     async def run(self):
@@ -346,11 +412,26 @@ class Service:
                 effort_ok=bool(re.search(r"Extra High|極高|极高",label)) if effort=='extra_high' else bool(re.search(r"(^|\s)High($|\s)|推理強度\s*高$",label))
                 if not effort_ok or re.search(r"5\.6|\bPro\b",label):
                     raise BridgeError("MODEL_SELECTION_CHANGED", "网页当前模型／思考选择发生变化，无法继续确认所请求配置。",stage="observe",action=True)
-            result = dict(content=turn["assistant_text"], sources=turn.get("sources", []),observed_at=now(),browser_turn_state=state,external_images=turn.get("external_images",[]),
+            self.last_verified_page={'page_label':response['page_label'],'at':now()}
+            ready=bool(state=='complete' and turn.get('render_ready',True) and not turn.get('generation_active',False)
+                and (turn['assistant_text'] or turn.get('artifacts') or turn.get('external_images') or turn.get('unsupported_outputs'))
+                and (turn.get('regenerate') or turn.get('artifacts') or turn.get('external_images') or turn.get('unsupported_outputs')))
+            signature=hashlib.sha256(json.dumps({k:turn.get(k) for k in ('assistant_text','assistant_markdown','assistant_id','sources','artifacts','external_images','unsupported_outputs')},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+            previous=(op.get('result') or {}).get('completion_confirmation') or {}
+            same=ready and previous.get('signature')==signature
+            since=previous.get('since',now()) if same else now()
+            samples=previous.get('samples',0)+1 if same else 1
+            stable=ready and ((samples>=2 and now()-since>=self.settings.completion_confirm_seconds) or self.settings.completion_confirm_seconds==0)
+            confirmation={'signature':signature,'since':since,'samples':samples} if ready else None
+            result = dict(content=turn["assistant_text"],markdown=turn.get('assistant_markdown'),
+                          extraction=turn.get('extraction'),extraction_stable=stable,generation_done=state=='complete',
+                          completion_confirmation=confirmation,semantic_validation='not_performed',
+                          content_sha256=hashlib.sha256(turn['assistant_text'].encode()).hexdigest(),
+                          context_policy={'mode':op['payload'].get('context_mode','project'),'project_context_may_apply':True,'memory_isolation_verified':False}, sources=turn.get("sources", []),observed_at=now(),browser_turn_state=state,external_images=turn.get("external_images",[]),
                           user_message_id=turn.get("user_id"), assistant_message_id=turn.get("assistant_id"),
-                          history=history(turns), observed=op["observed"], completeness_signal=state if turn.get('render_ready',True) else 'pending_render',
+                          history=history(turns), observed=op["observed"], completeness_signal='complete' if stable else 'confirming' if ready else state if state!='complete' else 'pending_render',
                           warning="模型与思考等级仅通过网页选择器核验，未验证推理后端。")
-            if state == "complete" and turn.get('render_ready',True) and (turn["assistant_text"] or turn.get('artifacts') or turn.get('external_images') or turn.get('unsupported_outputs')) and (turn.get("regenerate") or turn.get('artifacts') or turn.get('external_images') or turn.get('unsupported_outputs')):
+            if stable:
                 result=await self.package_result(op,turn,result)
                 self.store.transition(op["id"], "COMPLETED" if result['delivery_complete'] else 'NEEDS_ATTENTION', result=result,
                                       error=None if result['delivery_complete'] else BridgeError('ARTIFACT_CAPTURE_FAILED','回答已生成，部分产物尚未得到可回传内容；无需重新发送问题。',stage='artifact',action=True).data)

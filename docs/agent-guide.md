@@ -6,7 +6,7 @@
 
 1. 可先用廉价的 `diagnose` 查看服务/worker。`health_check` 是可选的浏览器控件诊断，可能较慢；失败不意味着服务整体不可用，不要反复调用。每次发送前仍会独立核验账户、专案与模型。
 2. `create_query(text, request_id)` 返回 Query ID 和消息操作 ID；请求接受不等于生成完成。
-3. 每5秒查询 `get_query_result`，同时保存 Query ID 与消息操作 ID。`result.content` 是截至最近观察的累计快照，可能增长或被网页修订；更新时替换旧快照，不要盲目拼接。`result_is_partial=true` 表示可先读取但仍需等待，不能因为暂时为空就创建第二份请求；遵循 `next_action`。
+3. 优先 `wait_query(timeout_seconds=25, cursor=上次cursor)` 等待变化，完成后 `get_query_result` 取正文，同时保存 Query ID 与消息操作 ID。`result.content` 是截至最近观察的累计快照，可能增长或被网页修订；更新时替换旧快照，不要盲目拼接。`result_is_partial=true` 表示可先读取但仍需等待，不能因为暂时为空就创建第二份请求；遵循 `next_action`。
 4. `complete=true` 才表示这一轮的生成及交付均完成。`generation_complete=true` 时正文已生成，文件未齐也可以先使用正文。`generation_complete=true`、`delivery_complete=false` 时使用 `collect_artifacts`，不要重新提问。
 5. 用原 Query ID 调用 `continue_query` 保留上下文，每轮使用新的 request_id。
 
@@ -76,3 +76,18 @@ CLI `--wait` 的退出码：0=这一轮完成，1=请求或连接失败，2=任�
 OUTCOME_UNKNOWN 表示关联尚未确认，先调用 `recover_session`；持续失败再 `diagnose`，把结构化证据交给服务维护者。只要已有发送意图就不能换键重发。网页仍在输出时，状态保持 GENERATING，`progress.answer_characters/source_count/last_observed_at` 表明最近观察到的增量，`complete=false` 不等于失败。
 
 网页引用的外部图片以 `external_images` 和 `outputs[type=link, kind=web_image_reference]` 回传 URL，`delivery=reference_only` 表示未缓存第三方图片字节。搜索过程中的临时缩略图不算交付文件。ChatGPT 原生生成图片和文件继续走 `artifacts`，仅实际取得并校验字节后才标为 AVAILABLE；不要把引用链接当作本地图片。
+
+
+## 状态、正文与验收（v0.4.3）
+
+- `generation_done`：网页本轮标记 complete，不等于已通过稳定性确认。
+- `extraction_stable`：结束条件和内容/产物指纹跨至少两次观察一致且至少4秒；继续思考、正文或产物变化会重置确认。
+- `generation_complete`：已通过上述确认；`delivery_complete`：产物已交付；`complete`：操作完成且交付完成。
+- `semantic_validation=not_performed`：请调用方核对条目数、字数、来源可信度和是否回答了请求。桥接服务不做隐式第二次模型审查。
+- `extraction` 中的 `dom_inner_text_characters` 包含页面渲染文本，`plain_text_characters` 排除了按钮并规范化换行，两者不应直接用差值判断截断。`content_sha256` 始终针对原始纯文本；Markdown 请求会另外返回 `delivered_content_sha256`。
+- `source_status=no_sources_present` 仅指当前可见回答 DOM 没有 anchor；不能证明整个模型研究没有来源。历史分页及完整覆盖未获验证，字段会如实标记。
+- `wait_query` 无 cursor 首次立即给快照；后续携带 cursor 等待变化，默认不返回正文。`include_content=true` 可读阶段快照，替换此前内容；状态变化也可能触发返回。指定 message_id 可固定某一轮。
+- MCP 结果同时兼容结构化和纯文本客户端，只读一个渠道。`get_query_result` 默认不重复 outputs，可显式 `include_outputs=true` 兼容旧客户端；`compact=false` 返回全部元数据。
+- `context_mode=request_only_best_effort` 是提示词层面的范围约束，不是无记忆环境；响应明确 `memory_isolation_verified=false`。
+
+含 URL 的提示词可能触发网页自动富链接。桥接在检测到此转换时使用保留原文字面的代码块输入，并在 `observed.prompt_input=literal_code_block` 中标明；仍有转换风险则在发送前报错。发送后严格核对原文与唯一请求标识，不接受“差不多相同”的关联。

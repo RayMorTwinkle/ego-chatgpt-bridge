@@ -71,6 +71,7 @@ class Settings:
     expected_account: str = ""
     default_owner: str = "default"
     max_active: int = 2
+    completion_confirm_seconds: float = 4
     poll_seconds: float = 4
     soft_timeout: float = 600
     hard_timeout: float = 3600
@@ -109,6 +110,8 @@ class Settings:
             if key in data:
                 data[key] = tuple(data[key])
         result = cls(runtime=runtime, **data)
+        if not 0 <= result.completion_confirm_seconds <= 60:
+            raise ValueError('completion_confirm_seconds must be 0..60')
         if not 1 <= result.max_active <= 4:
             raise ValueError("max_active must be 1..4")
         if result.oauth_issuer and (not 1 <= result.public_gateway_port <= 65535 or result.public_gateway_port==result.port):

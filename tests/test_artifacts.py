@@ -115,7 +115,7 @@ def test_filename_never_supplies_a_storage_path():
 
 
 async def test_image_only_answer_and_download_retry_never_resend_prompt(tmp_path):
-    settings=Settings(tmp_path);store=Store(tmp_path);browser=FileBrowser(data=b'');service=Service(settings,store,browser)
+    settings=Settings(tmp_path,completion_confirm_seconds=0);store=Store(tmp_path);browser=FileBrowser(data=b'');service=Service(settings,store,browser)
     task=await service.dispatch('alice','create_query',{'text':'Create image','request_id':'image'})
     op=store.operation(task['message_id']);await service.execute(op)
     browser.pages['p1'][0].update(assistant_text='',regenerate=False,artifacts=[{'kind':'file_card','index':0,'name':'test.png'}])
@@ -132,7 +132,7 @@ async def test_image_only_answer_and_download_retry_never_resend_prompt(tmp_path
 
 
 async def test_unexported_media_is_reported_as_partial_not_lost(tmp_path):
-    settings=Settings(tmp_path);store=Store(tmp_path);browser=FileBrowser();s=Service(settings,store,browser)
+    settings=Settings(tmp_path,completion_confirm_seconds=0);store=Store(tmp_path);browser=FileBrowser();s=Service(settings,store,browser)
     task=await s.dispatch('alice','create_query',{'text':'Create video','request_id':'video'})
     await s.execute(store.operation(task['message_id']))
     browser.pages['p1'][0].update(assistant_text='',regenerate=False,unsupported_outputs=[{'kind':'video','export_status':'UNSUPPORTED'}])
@@ -158,7 +158,7 @@ async def test_backup_contains_verified_blobs_and_aborts_on_corruption(tmp_path)
 @pytest.mark.parametrize('reference_present',[True,False])
 async def test_external_web_images_do_not_block_real_file_delivery_or_get_fake_bytes(tmp_path,reference_present):
     import json
-    settings=Settings(tmp_path);store=Store(tmp_path);browser=FileBrowser();service=Service(settings,store,browser)
+    settings=Settings(tmp_path,completion_confirm_seconds=0);store=Store(tmp_path);browser=FileBrowser();service=Service(settings,store,browser)
     op,row=await seed(service.artifacts,store,browser)
     reference={'index':0,'title':'Official diagram','url':'https://public.example.org/diagram.png','delivery':'reference_only'}
     store.db.execute("UPDATE artifacts SET status='FAILED',error=?,candidate=? WHERE id=?",(json.dumps({'error_code':'EXTERNAL_IMAGE_NOT_COPIED'}),json.dumps({'kind':'inline_image','index':0,'name':'image-1.png'}),row['artifact_id']))

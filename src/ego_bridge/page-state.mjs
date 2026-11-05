@@ -11,6 +11,37 @@ export function readChatPage() {
     for(const e of copy.querySelectorAll(block)){e.prepend('\n');e.append('\n');}
     return (copy.textContent??'').replace(/\r\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
   }
+  // Serialize only observed answer DOM; no clipboard, hidden application state or API.
+  function markdown(node){
+    if(node.nodeType===3)return (node.textContent||'').replace(/([\\`*_[\]<>])/g,'\\$1');
+    if(node.nodeType!==1||node.matches(ignored))return '';
+    const tag=node.tagName.toLowerCase();
+    const children=()=>Array.from(node.childNodes).map(markdown).join('');
+    if(tag==='br')return '\n';
+    if(tag==='a'){
+      let href;try{href=new URL(node.getAttribute('href'),location.href);}catch{return children();}
+      return ['http:','https:'].includes(href.protocol)?`[${children().trim()}](${href.href.replace(/\(/g,'%28').replace(/\)/g,'%29')})`:children();
+    }
+    if(tag==='pre'){const raw=node.textContent||'';const fence='`'.repeat(Math.max(3,...Array.from(raw.matchAll(/`+/g),m=>m[0].length+1)));return `\n\n${fence}\n${raw}\n${fence}\n\n`;}
+    if(tag==='code'){const raw=node.textContent||'';const fence='`'.repeat(Math.max(1,...Array.from(raw.matchAll(/`+/g),m=>m[0].length+1)));return `${fence} ${raw} ${fence}`;}
+    if(tag==='table'){
+      const rows=Array.from(node.querySelectorAll('tr')).filter(r=>r.closest('table')===node).map(r=>Array.from(r.children).filter(c=>['TH','TD'].includes(c.tagName)).map(c=>markdown(c).trim().replace(/\n+/g,'<br>').replace(/\|/g,'\\|')));
+      if(!rows.length)return '';
+      const width=Math.max(...rows.map(r=>r.length));const line=r=>'| '+Array.from({length:width},(_,i)=>r[i]||'').join(' | ')+' |';
+      const hasHeader=!!node.querySelector('tr th');
+      const header=hasHeader?rows.shift():Array(width).fill('');
+      return '\n\n'+[line(header),line(Array(width).fill('---')),...rows.map(line)].join('\n')+'\n\n';
+    }
+    const value=children();
+    if(/^h[1-6]$/.test(tag))return '\n\n'+'#'.repeat(Number(tag[1]))+' '+value.trim()+'\n\n';
+    if(tag==='strong'||tag==='b')return '**'+value+'**';
+    if(tag==='em'||tag==='i')return '*'+value+'*';
+    if(tag==='li')return '\n'+(node.parentElement?.tagName==='OL'?`${Array.from(node.parentElement.children).indexOf(node)+Number(node.parentElement.getAttribute('start')||1)}. `:'- ')+value.trim().replace(/\n/g,'\n  ');
+    if(tag==='blockquote')return '\n\n'+value.trim().split('\n').map(l=>'> '+l).join('\n')+'\n\n';
+    if(tag==='hr')return '\n\n---\n\n';
+    return /^(p|div|section|article|ul|ol)$/.test(tag)?'\n\n'+value.trim()+'\n\n':value;
+  }
+  const generation_active=Array.from(document.querySelectorAll('form button')).some(e=>visible(e)&&/stop|停止|停止串流/i.test(e.getAttribute('aria-label')||''));
   const turns=Array.from(document.querySelectorAll('[data-talvt-turn-state]')).map(turn=>{
     const user=turn.querySelector('[data-chatgpt-search-message-ids]');
     const all=Array.from(turn.querySelectorAll('[data-markdown-text-style="assistant-message"]'));
@@ -40,14 +71,21 @@ export function readChatPage() {
       if(!visible(a)||seen.has(a.href))continue;
       seen.add(a.href);sources.push({title:text(a),url:a.href});
     }
-    return {state:turn.getAttribute('data-talvt-turn-state'),user_id:user?.getAttribute('data-chatgpt-search-message-ids')??null,
+    const answerAnchors=responses.flatMap(e=>Array.from(e.querySelectorAll('a[href]')).filter(visible));
+    const extraction={scope:'visible_answer_dom',history_pagination_verified:false,truncation_status:'not_proven_absent',
+      answer_anchor_count:answerAnchors.length,turn_anchor_count:turn.querySelectorAll('a[href]').length,
+      source_status:sources.length?'sources_present':answerAnchors.length?'anchors_not_extracted':'no_sources_present',
+      plain_text_characters:answer.length,dom_inner_text_characters:responses.reduce((n,e)=>n+(e.innerText||e.textContent||'').length,0),
+      table_count:responses.reduce((n,e)=>n+e.querySelectorAll('table').length,0),
+      blocks:responses.map((e,index)=>({index,message_id:(e.closest('[data-chatgpt-selection-message-id]')||e.querySelector('[data-chatgpt-selection-message-id]'))?.getAttribute('data-chatgpt-selection-message-id')||null,characters:text(e).length}))};
+    return {assistant_markdown:responses.map(markdown).join('\n\n').replace(/\n{3,}/g,'\n\n').trim(),extraction,generation_active,state:turn.getAttribute('data-talvt-turn-state'),user_id:user?.getAttribute('data-chatgpt-search-message-ids')??null,
       user_text:text(user?.querySelector('[data-search-result-target]')||user),assistant_id:selected?.getAttribute('data-chatgpt-selection-message-id')??null,
       assistant_text:answer,sources,external_images,render_ready:!!(answer||native_images.some(i=>i.complete&&i.naturalWidth>0)||external_images.length||unsupported_outputs.length)&&native_images.every(i=>i.complete&&i.naturalWidth>0),
       artifacts,unsupported_outputs,regenerate:!!turn.querySelector('button[aria-label="重新產生回覆"]'),
-      reader_diagnostics:{version:2,progress_images_ignored,answer_roots:responses.length,reasoning_nodes_excluded:all.filter(e=>e.closest('[data-markdown-text-tone="tertiary"]')).length,user_controls_excluded:user?.querySelectorAll(ignored).length??0}};
+      reader_diagnostics:{version:3,progress_images_ignored,answer_roots:responses.length,reasoning_nodes_excluded:all.filter(e=>e.closest('[data-markdown-text-tone="tertiary"]')).length,user_controls_excluded:user?.querySelectorAll(ignored).length??0}};
   });
   const editor=document.querySelector('form [contenteditable="true"]');
-  return {url:location.href,title:document.title,turns,editor_present:visible(editor),draft:editor?.innerText??'',
+  return {url:location.href,title:document.title,turns,editor_present:visible(editor),draft:text(editor),draft_has_autolinks:!!editor?.querySelector('[data-rich-text-generated-autolink]'),
     model_label:document.querySelector('button[aria-label="選取 ChatGPT 模型"]')?.innerText,
     buttons:Array.from(document.querySelectorAll('form button')).filter(visible).map(b=>({label:b.getAttribute('aria-label'),disabled:b.disabled})),
     dialogs:Array.from(document.querySelectorAll('[role="dialog"],[role="alertdialog"]')).filter(visible).map(e=>e.innerText.slice(0,800)),

@@ -76,3 +76,29 @@ test('search progress thumbnails outside the final answer are not deliverable ar
   const turn=readChatPage().turns[0];
   assert.deepEqual(turn.artifacts,[]);assert.deepEqual(turn.external_images,[]);
 });
+
+test('Markdown preserves tables, source positions, and excludes reasoning',()=>{
+  fixture(user()+thought+`<div data-chatgpt-selection-message-id="a1"><div data-markdown-text-style="assistant-message"><h2>Options</h2><table><tr><th>Name</th><th>Source</th></tr><tr><td>A</td><td><a href="https://example.org/a">Official</a></td></tr></table><p>After table</p></div></div>`,'complete');
+  const t=readChatPage().turns[0];
+  assert.match(t.assistant_markdown,/\| Name \| Source \|/);
+  assert.match(t.assistant_markdown,/\[Official\]\(https:\/\/example.org\/a\)/);
+  assert.equal(t.extraction.answer_anchor_count,1);
+  assert.equal(t.extraction.source_status,'sources_present');
+  assert.equal(t.extraction.blocks.length,1);
+  assert.doesNotMatch(t.assistant_markdown,/Searching sources/);
+});
+
+test('source absence and stop-generation signal are explicit',()=>{
+  fixture(user()+'<div data-markdown-text-style="assistant-message"><p>Introduction</p></div>','complete');
+  document.querySelector('form').insertAdjacentHTML('beforeend','<button aria-label="停止串流"></button>');
+  const t=readChatPage().turns[0];
+  assert.equal(t.extraction.source_status,'no_sources_present');
+  assert.equal(t.generation_active,true);
+});
+
+test('rich-link editor chrome does not add whitespace to exact submitted prompt',()=>{
+  fixture(user());const editor=document.querySelector('form [contenteditable]');
+  editor.innerHTML='<p>Read [Official](<span data-rich-text-generated-autolink><span aria-hidden="true" contenteditable="false">icon</span>https://example.org/</span>) now.</p><p>Second paragraph</p>';
+  Object.defineProperty(editor,'innerText',{value:'Read [Official](\nhttps://example.org/) now.\nSecond paragraph'});
+  assert.equal(readChatPage().draft,'Read [Official](https://example.org/) now.\n\nSecond paragraph');
+});

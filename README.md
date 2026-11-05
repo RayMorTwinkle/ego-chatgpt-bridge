@@ -127,7 +127,7 @@ HTTPS 是可选部署方式：主动设置 `tls_enabled=true` 后运行 `renew-t
 
 ## 联网研究与分段输出
 
-支持长提示词与联网研究的逐段正文读取。创建请求后每5秒轮询 `get_query_result`，读取 `result.content` 的增量并遵循 `next_action`；`result_is_partial=true` 时继续等待，`complete=true` 才是完整交付。`health_check` 为可选浏览器诊断，发送前会独立核验。空间ID属于服务器，客户端不必也不应据此启动本机Ego。
+支持长提示词与联网研究的逐段正文读取。创建请求后使用 `wait_query`（最长30秒、携带上次 cursor）等待变化，再用 `get_query_result` 读取 `result.content` 的累计快照并遵循 `next_action`；`result_is_partial=true` 时继续等待，`complete=true` 才是完整交付。`health_check` 为可选浏览器诊断，发送前会独立核验。空间ID属于服务器，客户端不必也不应据此启动本机Ego。
 
 ## 日志与文件保留
 
@@ -138,3 +138,10 @@ HTTPS 是可选部署方式：主动设置 `tls_enabled=true` 后运行 `renew-t
 运行目录 `backups/` 内的应用备份最长14天，且不晚于包内最早产物到期时间；到期删除整包，避免旧备份额外保留图片。旧版备份按其数据库里的采集时间推算。只管理本应用运行目录；手动复制到其他位置的文件由调用方管理。`verification/`、`evidence/` 内的临时验收文件也保留14天。
 
 策略可在 `config.json` 调整，修改后重启；现有文件的到期时间固定记录，新采集采用新配置。`diagnose` 返回保留策略和最近清理结果，运行目录 `retention.json` 保存清理回执。`.env`、TLS密钥和对话文字不会因文件轮换而删除。
+
+
+v0.4.3：完成判定要求整轮 `complete`、无停止生成按钮、产物渲染就绪，并跨至少两次观察保持内容/产物描述不变（默认至少4秒）。`generation_done` 只说明网页标记结束，`extraction_stable` 表示已通过上述确认；`complete` 仍不是研究质量验收，`semantic_validation=not_performed`。正文提取提供 Markdown 表格/内联链接及 DOM 字数、块 ID、anchor 数和覆盖范围证据。仅覆盖当前可见回答 DOM，不保证未渲染/虚拟分页内容不存在。
+
+`get_query_result` MCP 默认 Markdown、精简元数据、不重复 `outputs`；REST 为兼容保留旧默认，可传 `content_format="markdown", compact=true, include_outputs=false`。`include_content=false` 可只取状态。`wait_query` 返回变更 cursor，未变不重复正文；变化正文是替换快照，非 append delta。MCP 的 JSON 文本与 structuredContent 为兼容均保留，客户端只消费其中一种。
+
+`context_mode="request_only_best_effort"` 可用于创建/追加，附加仅依据本条请求和核验来源的范围约束。固定专案指令和记忆仍可能参与，不能保证真正隔离。健康检查使用独立临时页，`health` 分别返回 probe、worker、submission_blocked_by_probe 和最近核验页面；不再复用旧的卡死专案页或活动研究页。

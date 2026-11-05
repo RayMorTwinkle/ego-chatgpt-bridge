@@ -134,7 +134,7 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
                     tool.meta={**(tool.meta or {}),'securitySchemes':schemes}
                     tool.model_extra['securitySchemes']=schemes
             return tools
-    mcp = BridgeMCP("Ego ChatGPT Bridge", instructions="本服务在桥接服务器的 Ego Browser 中执行固定专案 GPT-6 研究。create_query 返回持久化任务，不代表完成；每5秒 get_query_result 读取 result.content 的累计快照（可能增长或修订，替换旧快照勿盲目拼接），result_is_partial=true 时继续等待，仅 complete=true 为最终交付。遵循 next_action。health_check 是可选浏览器诊断，失败不等于服务整体不可用，不要高频调用。OUTCOME_UNKNOWN 只用 recover_session/diagnose，切勿换幂等键重发。空间ID只在服务端浏览器实例有效，不要在客户端本机 ego-browser 查找；需要人工处理时把诊断交给维护者。文件和图片用 read_artifact 或 resources/read 获取。", stateless_http=True, json_response=True, transport_security=security)
+    mcp = BridgeMCP("Ego ChatGPT Bridge", instructions="本服务在桥接服务器的 Ego Browser 中执行固定专案 GPT-6 研究。create_query 返回持久化任务，不代表完成；优先 wait_query(timeout_seconds=25,cursor=上次cursor) 等待变化，完成后 get_query_result(content_format=markdown) 读取 result.content 的累计快照（可能增长或修订，替换旧快照勿盲目拼接），result_is_partial=true 时继续等待，仅 complete=true 为最终交付，但不代表语义质量验收；semantic_validation=not_performed。固定专案指令/记忆可能参与，不能保证上下文隔离。遵循 next_action。health_check 是可选浏览器诊断，失败不等于服务整体不可用，不要高频调用。OUTCOME_UNKNOWN 只用 recover_session/diagnose，切勿换幂等键重发。空间ID只在服务端浏览器实例有效，不要在客户端本机 ego-browser 查找；需要人工处理时把诊断交给维护者。文件和图片用 read_artifact 或 resources/read 获取。", stateless_http=True, json_response=True, transport_security=security)
 
     async def call(ctx: Context, name: str, args: dict):
         # Use request state, not a global user/session variable: sessions must not leak ownership.
@@ -142,24 +142,40 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
         return await service.dispatch(owner, name, args)
 
     @mcp.tool()
-    async def create_query(text: str, request_id: str, ctx: Context, effort: str = "extra_high", model: str = "GPT-6", soft_timeout: float = 600, hard_timeout: float = 3600) -> dict[str, Any]:
-        """在服务端固定专案新建异步查询，支持长文和多段提示词。返回 Query ID 后用 get_query_result 每5秒轮询，可先读取 result.content 的增量正文；仅 complete=true 才完成。request_id 是调用方作用域幂等键，超时勿换键重发。浏览器在桥接服务器，本机空间编号无关。只允许 GPT-6 和 extra_high/high。"""
-        return await call(ctx, "create_query", dict(text=text, request_id=request_id, effort=effort, model=model, soft_timeout=soft_timeout, hard_timeout=hard_timeout))
+    async def create_query(text: str, request_id: str, ctx: Context, effort: str = "extra_high", model: str = "GPT-6", soft_timeout: float = 600, hard_timeout: float = 3600, context_mode: str = "project") -> dict[str, Any]:
+        """在服务端固定专案新建异步查询，支持长文和多段提示词。返回 Query ID 后用 wait_query 等待变化后 get_query_result 取正文，可先读取 result.content 的增量正文；仅 complete=true 才完成。request_id 是调用方作用域幂等键，超时勿换键重发。浏览器在桥接服务器，本机空间编号无关。只允许 GPT-6 和 extra_high/high。context_mode=request_only_best_effort 会附加仅依据本请求的范围约束，但不能隔离固定专案记忆。"""
+        return await call(ctx, "create_query", dict(text=text, request_id=request_id, effort=effort, model=model, soft_timeout=soft_timeout, hard_timeout=hard_timeout, context_mode=context_mode))
 
     @mcp.tool()
-    async def continue_query(query_id: str, text: str, request_id: str, ctx: Context, effort: str = "extra_high", soft_timeout: float = 600, hard_timeout: float = 3600) -> dict[str, Any]:
+    async def continue_query(query_id: str, text: str, request_id: str, ctx: Context, effort: str = "extra_high", soft_timeout: float = 600, hard_timeout: float = 3600, context_mode: str = "project") -> dict[str, Any]:
         """在 Query ID 对应的同一网页会话追加消息；同会话按接收顺序执行。"""
-        return await call(ctx, "continue_query", dict(query_id=query_id, text=text, request_id=request_id, effort=effort, soft_timeout=soft_timeout, hard_timeout=hard_timeout))
+        return await call(ctx, "continue_query", dict(query_id=query_id, text=text, request_id=request_id, effort=effort, soft_timeout=soft_timeout, hard_timeout=hard_timeout, context_mode=context_mode))
 
     @mcp.tool()
     async def get_query_status(query_id: str, ctx: Context, message_id: str | None = None) -> dict[str, Any]:
         """读取持久化状态，不触发重发。可指定消息操作 ID。"""
         return await call(ctx, "get_query_status", dict(query_id=query_id, message_id=message_id))
 
-    @mcp.tool()
-    async def get_query_result(query_id: str, ctx: Context, message_id: str | None = None) -> dict[str, Any]:
-        """轮询同一 Query/消息操作，返回逐步增长的 result.content、来源、progress 和 next_action。result_is_partial=true 表示尚在输出，可先读后继续等待；complete=true 才是最终交付。未完成不是失败；勿重发。"""
-        return await call(ctx, "get_query_result", dict(query_id=query_id, message_id=message_id))
+    def result_envelope(value):
+        # Structured consumers get one full payload. Text-only consumers receive
+        # the full payload too; use include_content=False / wait_query to keep it small.
+        return types.CallToolResult(content=[types.TextContent(type='text',text=json.dumps(value,ensure_ascii=False))],
+            structuredContent=value,isError=not value.get('ok',False))
+
+    @mcp.tool(structured_output=False)
+    async def get_query_result(query_id: str, ctx: Context, message_id: str | None = None,
+            include_content: bool = True, include_outputs: bool = False, compact: bool = True,
+            content_format: str = "markdown") -> types.CallToolResult:
+        """取累计快照（替换旧快照，勿拼接）。默认保留 Markdown 表格/链接且不重复 outputs。complete 仅表示生成/交付完成，语义需调用方验收；中间结果 result_is_partial=true。轮询优先 wait_query。选择 structuredContent 或 JSON content 其中一个渠道，勿重复读取。"""
+        return result_envelope(await call(ctx, "get_query_result", dict(query_id=query_id,message_id=message_id,
+            include_content=include_content,include_outputs=include_outputs,compact=compact,content_format=content_format)))
+
+    @mcp.tool(structured_output=False)
+    async def wait_query(query_id: str, ctx: Context, message_id: str | None = None, cursor: str | None = None,
+            timeout_seconds: float = 25, include_content: bool = False, content_format: str = "markdown") -> types.CallToolResult:
+        """等待状态/内容变化，最长30秒，不操作浏览器、不阻塞 worker。传回上次 cursor；changed=false 时不重复正文。默认仅精简状态；需要阶段正文设 include_content=true，收到的是替换快照而非追加 delta。完成后 get_query_result 获取最终内容。"""
+        return result_envelope(await call(ctx,'wait_query',dict(query_id=query_id,message_id=message_id,cursor=cursor,
+            timeout_seconds=timeout_seconds,include_content=include_content,content_format=content_format)))
 
     @mcp.tool()
     async def list_queries(ctx: Context, status: str | None = None, limit: int = 20, offset: int = 0) -> dict[str, Any]:

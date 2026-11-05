@@ -36,8 +36,12 @@ async def main(runtime):
             async with httpx.AsyncClient(timeout=60,trust_env=False,headers={'Authorization':'Bearer '+tokens['access_token']}) as http:
                 async with streamable_http_client(resource,http_client=http) as (read,write,_):
                     async with ClientSession(read,write) as session:
-                        await session.initialize();tools=await session.list_tools();assert len(tools.tools)==17;checks['mcp_initialize_and_17_tools']=True
+                        await session.initialize();tools=await session.list_tools();assert {'create_query','wait_query','get_query_result','read_artifact'}<={t.name for t in tools.tools};checks['mcp_tool_count']=len(tools.tools)
                         result=await session.call_tool('list_queries',{'limit':100});assert not result.isError;queries=result.structuredContent['queries'];checks['owner_queries_returned']=len(queries)
+                        if queries:
+                            waited=await session.call_tool('wait_query',{'query_id':queries[0]['id'],'timeout_seconds':0})
+                            assert not waited.isError and 'cursor' in waited.structuredContent and 'result' not in waited.structuredContent
+                            checks['public_oauth_compact_wait']=True
                         rejected=await http.post(resource,json={'jsonrpc':'2.0','id':77,'method':'tools/call','params':{'name':'create_query','arguments':{'text':'never sent','request_id':'scope-probe'}}})
                         assert rejected.status_code==403;checks['readonly_write_denied']=True
                         gate=asyncio.Semaphore(4)

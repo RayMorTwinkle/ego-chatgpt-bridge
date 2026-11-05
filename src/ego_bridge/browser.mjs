@@ -277,7 +277,17 @@ async function main() {
     return {...receipt,state:s,read_only:true,history_pagination_verified:false};
   }
   if(input.action==='inventory') return {space_id:task.spaceId,tabs:(await task.tabs()).filter(t=>identity(t.url).project===input.project_id).map(t=>({label:t.label,url:t.url,openedBy:t.openedBy}))};
-  const page=await choosePage(task,['prepare','recover','health','capture_artifact'].includes(input.action));
+  if(input.action==='health') {
+    // Never borrow an active research page or an unrelated stale project tab.
+    const probe=await freshPage(task);receipt.page_label=probe.label;
+    try {
+      await probe.goto(input.project_url,{timeout:15000});await usable(probe);
+      const s=await state(probe);check(s);
+      const a=await account(probe);const m=await modelInfo(probe);await probe.keyboard.press('Escape');
+      return {...receipt,probe_scope:'dedicated_page',space_id:task.spaceId,project_id:s.identity.project,account:a,model_options:m,editor_present:s.editor_present,healthy:m.models.some(m=>m.label==='GPT-6'&&m.checked)};
+    } finally {try{await probe.close();}catch{receipt.probe_cleanup_failed=true;}}
+  }
+  const page=await choosePage(task,['prepare','recover','capture_artifact'].includes(input.action));
   receipt.page_label=page.label;
   if(input.target_user_message_id){
     try {
@@ -304,10 +314,7 @@ async function main() {
     if(page.openedBy!=='agent') return {closed:false,reason:'user_origin_tab_retained'};
     await page.close();return {closed:true};
   }
-  if(input.action==='health') {
-    const a=await account(page);const m=await modelInfo(page);await page.keyboard.press('Escape');
-    return {...receipt,space_id:task.spaceId,project_id:s.identity.project,account:a,model_options:m,editor_present:s.editor_present,healthy:m.models.some(m=>m.label==='GPT-6'&&m.checked)};
-  }
+
   if(input.action==='prepare') {
     if(!input.conversation_url&&(s.identity.conversation||s.turns.length)) fail('CONVERSATION_MISMATCH','新查询只能从空的项目输入页发起，不能追加到未绑定的会话。','prepare');
     if(s.turns.some(t=>t.state!=='complete')) fail('CONVERSATION_BUSY','页面中存在尚未完成的消息。','prepare');
@@ -320,12 +327,32 @@ async function main() {
       fail('HISTORY_CHANGED','会话历史与上次完成记录不一致，可能被人工修改。','prepare');
     const accountState=await account(page);
     const model=await configure(page);
-    await page.fill(EDITOR,input.send_text);
-    const after=await state(page);
+    if(norm(s.draft)!==norm(input.send_text)) {
+      try {await page.fill(EDITOR,input.send_text);}
+      catch(error) {
+        // Ego's fill readback can include an autolink icon's layout newline.
+        // Only this specific readback failure is reconciled below; timeouts and
+        // control loss are never swallowed. No second edit or send is attempted.
+        if(!String(error.message).includes('page.fill did not accept the text'))throw error;
+        receipt.fill_readback_reconciled=true;
+      }
+    }
+    let after=await state(page);
+    if(after.draft_has_autolinks) {
+      // The rich composer serializes generated autolinks into Markdown, changing
+      // the request after send. A literal code block preserves the actual text.
+      if(norm(after.draft)!==norm(input.send_text))fail('DRAFT_MISMATCH','富链接草稿与请求不一致；未发送。','prepare');
+      const html='<pre><code>'+input.send_text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</code></pre>';
+      await page.click(EDITOR);await page.keyboard.press('ControlOrMeta+a');
+      await page.keyboard.paste({text:input.send_text,html});
+      after=await state(page);model.prompt_input='literal_code_block';
+      if(after.draft_has_autolinks)fail('DRAFT_SERIALIZATION_UNSAFE','网页仍将提示词自动转换成富链接；未发送。','prepare');
+    }
     if(norm(after.draft)!==norm(input.send_text)) fail('DRAFT_MISMATCH','草稿读回与请求不一致。','prepare');
     return {...receipt,baseline:s,observed:model,account:accountState};
   }
   if(input.action==='submit') {
+    if(s.draft_has_autolinks)fail('DRAFT_SERIALIZATION_UNSAFE','待发送草稿包含会改变请求的自动富链接。','submit_precondition');
     if(norm(s.draft)!==norm(input.send_text)) fail('DRAFT_MISMATCH','待发送内容已改变。','submit_precondition');
     if(s.turns.length!==input.baseline.turns.length) fail('HISTORY_CHANGED','提交前会话消息数量变化。','submit_precondition');
     if(s.identity.conversation!==input.baseline.identity.conversation) fail('CONVERSATION_MISMATCH','准备完成后标签页会话身份发生变化。','submit_precondition');
@@ -333,6 +360,7 @@ async function main() {
     if(JSON.stringify(h(s.turns))!==JSON.stringify(h(input.baseline.turns))) fail('HISTORY_CHANGED','提交前既有消息被编辑。','submit_precondition');
     const m=await configure(page,false);
     const before=await state(page);check(before,input.conversation_url?identity(input.conversation_url).conversation:null);
+    if(before.draft_has_autolinks)fail('DRAFT_SERIALIZATION_UNSAFE','模型核验后出现自动富链接；未发送。','submit_precondition');
     if(norm(before.draft)!==norm(input.send_text)) fail('DRAFT_MISMATCH','模型验证后草稿发生变化。','submit_precondition');
     receipt.click_attempted=true;
     await page.click('loc=css:button[aria-label="傳送"]');

@@ -157,7 +157,7 @@ async def test_observation_failure_can_recover_without_resend(rig,code):
 
 @pytest.fixture
 def rig(tmp_path):
-    settings = Settings(tmp_path, poll_seconds=0.01)
+    settings = Settings(tmp_path, poll_seconds=0.01, completion_confirm_seconds=0)
     store = Store(tmp_path)
     fake = FakeBrowser()
     service = Service(settings, store, fake)
@@ -365,7 +365,7 @@ async def test_hydrating_user_bubble_is_pending_then_streams_without_resend(rig)
     partial=await s.dispatch('alice','get_query_result',{'query_id':a['query_id']})
     assert partial['status']=='GENERATING' and not partial['complete']
     assert partial['result']['content']=='First research section'
-    assert partial['result_is_partial'] and partial['next_action']['tool']=='get_query_result'
+    assert partial['result_is_partial'] and partial['next_action']['tool']=='wait_query'
     turn.update(assistant_text='First research section\nSecond research section',state='complete',regenerate=True)
     await s.observe(db.operation(a['message_id']))
     final=await s.dispatch('alice','get_query_result',{'query_id':a['query_id']})
@@ -401,3 +401,74 @@ async def test_health_failure_is_advisory_and_does_not_block_independently_verif
     assert result['execution_context']['client_local_browser_cli_required'] is False
     task=await create(s);await execute(s,db,task)
     assert len(fake.sent)==1 and db.operation(task['message_id'])['status']=='WAITING_FOR_RESPONSE'
+
+async def test_completion_requires_stable_entire_turn_and_resets_on_more_output(rig,monkeypatch):
+    s,db,fake=rig
+    s.settings.completion_confirm_seconds=4
+    clock=[1000.0];monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
+    a=await create(s);await execute(s,db,a)
+    await s.observe(db.operation(a['message_id']))
+    r=await s.dispatch('alice','get_query_result',{'query_id':a['query_id']})
+    assert not r['complete'] and not r['generation_complete']
+    turn=fake.pages['p1'][0];turn.update(state='thinking',assistant_text='First section')
+    clock[0]+=5;await s.observe(db.operation(a['message_id']))
+    turn.update(state='complete',assistant_text='First section and final section')
+    clock[0]+=5;await s.observe(db.operation(a['message_id']))
+    assert db.operation(a['message_id'])['status']=='GENERATING'
+    clock[0]+=5;await s.observe(db.operation(a['message_id']))
+    r=await s.dispatch('alice','get_query_result',{'query_id':a['query_id']})
+    assert r['complete'] and r['extraction_stable'] and r['semantic_validation']=='not_performed'
+    assert len(fake.sent)==1
+
+async def test_wait_cursor_suppresses_unchanged_content_and_preserves_owner_scope(rig):
+    s,db,fake=rig
+    fake.complete=False
+    a=await create(s);await execute(s,db,a);await s.observe(db.operation(a['message_id']))
+    args={'query_id':a['query_id'],'timeout_seconds':0,'include_content':True}
+    first=await s.dispatch('alice','wait_query',args)
+    assert first['changed'] and first['result']['content']=='partial'
+    again=await s.dispatch('alice','wait_query',{**args,'cursor':first['cursor']})
+    assert not again['changed'] and 'result' not in again
+    assert not (await s.dispatch('bob','wait_query',args))['ok']
+    fake.pages['p1'][0]['assistant_text']='revised'
+    await s.observe(db.operation(a['message_id']))
+    changed=await s.dispatch('alice','wait_query',{**args,'cursor':first['cursor']})
+    assert changed['changed'] and changed['result']['content']=='revised'
+    assert 'outputs' not in changed['result']
+
+async def test_stop_signal_prevents_packaging_and_request_context_is_explicit(rig):
+    s,db,fake=rig
+    a=await create(s,context_mode='request_only_best_effort');await execute(s,db,a)
+    assert '不要把项目记忆' in fake.sent[0]
+    fake.pages['p1'][0]['generation_active']=True
+    await s.observe(db.operation(a['message_id']))
+    result=await s.dispatch('alice','get_query_result',{'query_id':a['query_id']})
+    assert result['generation_done'] and not result['generation_complete'] and not result['complete']
+    assert not result['result']['context_policy']['memory_isolation_verified']
+
+async def test_wait_releases_event_loop_and_returns_markdown_without_duplicate_outputs(rig):
+    import asyncio
+    s,db,fake=rig;fake.complete=False
+    a=await create(s);await execute(s,db,a);await s.observe(db.operation(a['message_id']))
+    before=await s.dispatch('alice','wait_query',{'query_id':a['query_id'],'timeout_seconds':0})
+    async def change():
+        await asyncio.sleep(.02)
+        fake.pages['p1'][0].update(assistant_text='New body',assistant_markdown='## New body')
+        await s.observe(db.operation(a['message_id']))
+    task=asyncio.create_task(change())
+    result=await s.dispatch('alice','wait_query',{'query_id':a['query_id'],'cursor':before['cursor'],'timeout_seconds':1,'include_content':True,'content_format':'markdown'})
+    await task
+    assert result['changed'] and result['result']['content']=='## New body'
+    assert 'markdown' not in result['result'] and 'outputs' not in result['result']
+
+async def test_health_timeout_is_page_scoped_but_login_failure_still_needs_operator(rig):
+    s,db,fake=rig
+    async def fail(action,**kw):raise BridgeError('EGO_PAGE_EVALUATION_TIMED_OUT','timeout',stage='health',action=True,context={'page_label':'p5'})
+    fake.call=fail
+    r=await s.dispatch('alice','health_check',{})
+    assert not r['error']['user_action_required'] and r['error']['safe_to_retry']
+    assert r['health']['probe']['page_label']=='p5' and not r['health']['submission_blocked_by_probe']
+    async def login(action,**kw):raise BridgeError('LOGIN_REQUIRED','login',stage='health',action=True)
+    fake.call=login
+    r=await s.dispatch('alice','health_check',{})
+    assert r['error']['user_action_required']

@@ -202,8 +202,10 @@ def _main():
             if time.monotonic() >= deadline:
                 print(json.dumps({"client_wait_timeout": True, "background_task_continues": True, **data}, ensure_ascii=False, indent=2))
                 sys.exit(3)
-            time.sleep(2)
-            data = client.post(f"{endpoint}/api/get_query_result", json={"query_id": data["query_id"], "message_id": data["message_id"]}).json()
+            data = client.post(f"{endpoint}/api/wait_query", json={"query_id": data["query_id"], "message_id": data["message_id"],
+                "cursor":data.get('cursor'),"timeout_seconds":min(25,max(0,deadline-time.monotonic()))}).json()
+        if args.wait and data.get('ok') and data.get('query_id'):
+            data=client.post(f"{endpoint}/api/get_query_result",json={"query_id":data['query_id'],"message_id":data['message_id'],"include_outputs":False,"content_format":"markdown"}).json()
         print(json.dumps(data, ensure_ascii=False, indent=2))
         if not data.get("ok"):
             sys.exit(1)

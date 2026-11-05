@@ -40,6 +40,16 @@ async def test_real_sdk_handshake_tools_and_owner_context(tmp_path):
                     assert not result.isError
                     assert result.structuredContent['ok']
                     assert result.structuredContent['queries']==[]
+                    created=(await session.call_tool('create_query',{'text':'test','request_id':'sdk-wait'})).structuredContent
+                    waited=await session.call_tool('wait_query',{'query_id':created['query_id'],'timeout_seconds':0})
+                    assert not waited.isError and waited.structuredContent['changed']
+                    assert 'result' not in waited.structuredContent
+                    next_action=waited.structuredContent.get('next_action')
+                    if next_action:assert next_action['arguments']['cursor']==waited.structuredContent['cursor']
+                    body=await session.call_tool('get_query_result',{'query_id':created['query_id'],'include_content':False})
+                    assert not body.isError and 'result' not in body.structuredContent
+                    denied=await session.call_tool('wait_query',{'query_id':'missing','timeout_seconds':0})
+                    assert denied.isError and not denied.structuredContent['ok']
 
 
 async def test_easytier_source_filter_does_not_trust_forwarded_headers(tmp_path):

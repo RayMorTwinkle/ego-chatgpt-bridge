@@ -134,3 +134,12 @@ launchd 的 KeepAlive 保护 supervisor。supervisor 以唯一锁运行，等待
 观察与追问前历史校验共用同一读取器。仅刚提交30秒内的空壳/前缀渲染会继续等待；真正的全文、请求标记或新增轮数不一致仍然拒绝关联，不自动重发。匹配严格通过后，即使未生成完，也先绑定已验证会话并持久化增量正文。原请求可通过只读recover恢复，无需新Query。
 
 Python回归：`uv run pytest -q`。DOM回归：`npm ci --ignore-scripts && npm run test:browser`；Node/linkedom只用于开发测试，运行Python服务不依赖node_modules。回归覆盖真实故障使用的HTML形态，区别于只模拟结构化turn的FakeBrowser测试。私有事故采样在运行目录 verification/incident-*，不得提交到公开仓库。
+
+
+## v0.4.3 结束确认与健康诊断
+
+默认 `completion_confirm_seconds=4`：至少两次观察跨过确认窗口，且整轮 complete、无停止生成控件、正文/来源/产物描述稳定、图片加载就绪后才下载产物。不是基于“正文几秒没变化”推断完成。此规则仍依赖网页标记和已渲染 DOM；不能证明未来不会继续输出，也不代替内容验收。旧版本已完成记录不会被追溯伪造为通过新确认，`extraction_stable=null` 表示未记录。
+
+`health_check` 使用独立临时专案页并在结束后关闭，避免既有卡死页面和正在生成的会话。失败返回 `health.probe`、`health.worker`、`submission_blocked_by_probe=false`、最近核验请求页面。超时不再要求客户端用户处理整个服务；登录/账户/配置问题仍保留相应人工处理要求。兼容字段 `service_available=true` 的范围由 `availability_scope=http_api_only` 限定。worker running 也不保证下一次浏览器操作必定成功。
+
+轮询优先 `wait_query`，单次0..30秒，不持有浏览器控制锁。cursor 对状态/内容/产物变化计算，忽略单纯观测时间刷新；响应是替换快照，非字符追加协议。客户端用上次 cursor，完成后按需取正文。CLI `--wait` 已改用该接口。Markdown 是从 DOM 重建，表格/链接保留，特殊交互式内容仍不能保证无损。
