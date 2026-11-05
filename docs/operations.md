@@ -113,3 +113,16 @@ launchd 的 KeepAlive 保护 supervisor。supervisor 以唯一锁运行，等待
 停止时先继续可能被 SIGSTOP 的子进程，再 SIGTERM 等待优雅退出，超过 15 秒才强制结束。消息意图仍由 SQLite 保留，重启后观察和对账，绝不自动重发。manage.py stop 卸载当前登录会话的 job，保留 plist 供下次登录；autostart uninstall 才移除自启动配置。
 
 机制依据：[Apple launchd 文档](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)。LaunchAgent 随用户登录加载，不能据此声称在登录前可控制 GUI 浏览器。
+
+### 自动保留策略（v0.4.1）
+
+`retention.py` 在服务启动及每小时执行；与浏览器执行锁协调，跳过同一对话的排队/活动操作和正被HTTP流式下载的文件。备份进程持有维护锁期间，清理轮次明确报告跳过，后续重试。元数据先标记过期、再删除字节；失败会在 `diagnose.retention.last_run.errors` 和 `retention.json` 记录，不把物理清理失败算作成功。
+
+- `artifact_retention_days=14`：从每次成功采集计时，下载与读取不续期；重新采集成功后开始新的14天。状态/下载链接即时反映过期，HTTP/MCP/CLI拒绝过期字节；运行中的下载可完成。
+- `export_retention_days=14`：完成生成后计时，整目录（ZIP及原始工作文件）清理，保留导出墓碑；已过期请求同一幂等键不会自动重新执行。
+- `log_retention_days=14, log_max_bytes=10485760, log_backup_count=5`：每日或达到阈值时gzip归档，每类最多5份且最多14天；监督器每60秒检查，手动serve模式每小时维护时检查，大小可能在检查间隔内暂时超过阈值。活动日志原inode不变；copy/truncate不是无损审计机制。
+- `maintenance_interval_seconds=3600`：清理间隔，过期下载即时拒绝，物理删除最多延后一轮；活动任务、下载和备份可继续延后。
+
+备份格式2记录 `created_at/expires_at`，整份备份到期点为生成时间+14天及所含产物到期时间的最小值，可能少于14天。每日新快照只纳入未过期AVAILABLE产物。备份中的对话文字随整个快照删除；在线数据库的文字和元数据继续保存。旧格式从ZIP里的SQLite推算原产物采集年龄，不以新复制ZIP的时间给旧图片续期。损坏/不识别的归档保留并报告错误，需人工检查。
+
+旧表新增 `expires_at`，按旧记录 `updated_at+保留期` 回填，不给既有产物重新加14天。新配置只影响新采集/新导出，已记录到期时间不自动延长。运行目录之外的调用方下载、副本及远端ChatGPT会话不由此清理器管理。

@@ -33,6 +33,7 @@ def download_artifact(client,endpoint,artifact_id,output: Path):
     response=client.post(endpoint+'/api/get_artifact',json={'artifact_id':artifact_id});response.raise_for_status();value=response.json()
     if not value.get('ok'):raise BridgeError(value['error']['error_code'],value['error']['message'])
     meta=value['artifact']
+    if meta['status']=='EXPIRED':raise BridgeError('ARTIFACT_EXPIRED','产物已超过保留期，请尝试重新采集。')
     if meta['status']!='AVAILABLE':raise BridgeError('ARTIFACT_NOT_READY','产物尚未可用。')
     output=output.expanduser().absolute()
     if output.exists():raise BridgeError('OUTPUT_EXISTS','目标已存在，拒绝覆盖。')

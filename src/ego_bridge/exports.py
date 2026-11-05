@@ -1,6 +1,7 @@
 """WebUI-only read-only exports. No normal Query records or MCP tools are created."""
 from __future__ import annotations
 
+from collections import Counter
 import asyncio
 import contextlib
 import json
@@ -27,18 +28,24 @@ def conversation_url(value: str) -> str:
 
 class ExportJobs:
     def __init__(self,service):
+        self.downloads=Counter()
         self.service=service;self.db=service.store.db;self.root=service.settings.runtime/'exports';self.tasks=set()
+        if self.root.is_symlink():raise BridgeError('INVALID_STORAGE','导出目录不能是符号链接。')
         self.root.mkdir(mode=0o700,exist_ok=True)
         self.db.execute('''CREATE TABLE IF NOT EXISTS debug_exports(
          id TEXT PRIMARY KEY,owner TEXT NOT NULL,request_id TEXT NOT NULL,url TEXT NOT NULL,status TEXT NOT NULL,
          manifest TEXT,error TEXT,created_at REAL NOT NULL,updated_at REAL NOT NULL,UNIQUE(owner,request_id))''')
         self.db.execute("UPDATE debug_exports SET status='NEEDS_ATTENTION',error=? WHERE status IN ('QUEUED','RUNNING')",(json.dumps({'error_code':'EXPORT_INTERRUPTED','message':'服务已重启，可重新发起只读导出。'}),))
+        columns={r[1] for r in self.db.execute('PRAGMA table_info(debug_exports)')}
+        if 'expires_at' not in columns:self.db.execute('ALTER TABLE debug_exports ADD COLUMN expires_at REAL')
+        self.db.execute('UPDATE debug_exports SET expires_at=updated_at+? WHERE expires_at IS NULL',(service.settings.export_retention_days*86400,))
 
     def get(self,owner,export_id):
         row=self.db.execute('SELECT * FROM debug_exports WHERE id=? AND owner=?',(export_id,owner)).fetchone()
         if not row:raise BridgeError('EXPORT_NOT_FOUND','找不到该导出。',stage='debug')
         result=dict(row)
         for key in ['manifest','error']:result[key]=json.loads(result[key]) if result[key] else None
+        if result['status'] not in {'QUEUED','RUNNING'} and result['expires_at'] is not None and result['expires_at']<=now():result['status']='EXPIRED'
         result['download_url']=f'/ui/api/exports/{export_id}/download' if result['status'] in {'COMPLETED','PARTIAL'} else None
         return result
 
@@ -54,7 +61,7 @@ class ExportJobs:
             return self.get(owner,old['id'])
         count=self.db.execute("SELECT COUNT(*) FROM debug_exports WHERE status IN ('QUEUED','RUNNING')").fetchone()[0]
         if count>=4:raise BridgeError('EXPORT_QUEUE_FULL','已有 4 个导出等待执行。')
-        job=identifier('export');self.db.execute('INSERT INTO debug_exports VALUES(?,?,?,?,?,?,?,?,?)',(job,owner,request_id,url,'QUEUED',None,None,now(),now()))
+        job=identifier('export');self.db.execute('INSERT INTO debug_exports(id,owner,request_id,url,status,manifest,error,created_at,updated_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(job,owner,request_id,url,'QUEUED',None,None,now(),now(),now()+self.service.settings.export_retention_days*86400))
         task=asyncio.create_task(self.run(owner,job));self.tasks.add(task);task.add_done_callback(self.tasks.discard)
         return self.get(owner,job)
 
@@ -108,7 +115,7 @@ class ExportJobs:
                     archive.writestr('README.txt','只读调试导出。文件缺失、未完成或未支持的内容见 manifest.json。\n未读取或导出 Cookie、Session Token、请求认证头。\n未核验服务端历史分页；长对话可能存在未加载历史。\n')
                     for source,name in files:archive.write(source,name)
                 temporary.chmod(0o600);os.replace(temporary,zip_path)
-                self.db.execute('UPDATE debug_exports SET status=?,manifest=?,updated_at=? WHERE id=?',('PARTIAL' if partial else 'COMPLETED',json.dumps(manifest,ensure_ascii=False),now(),job))
+                self.db.execute('UPDATE debug_exports SET status=?,manifest=?,updated_at=?,expires_at=? WHERE id=?',('PARTIAL' if partial else 'COMPLETED',json.dumps(manifest,ensure_ascii=False),now(),now()+self.service.settings.export_retention_days*86400,job))
         except asyncio.CancelledError:
             self.db.execute("UPDATE debug_exports SET status='NEEDS_ATTENTION',error=?,updated_at=? WHERE id=?",(json.dumps({'error_code':'EXPORT_INTERRUPTED','message':'导出中断，可重新发起只读导出。'}),now(),job));raise
         except Exception as error:
@@ -120,7 +127,7 @@ class ExportJobs:
 
     def delete(self,owner,job):
         row=self.get(owner,job)
-        if row['status'] in {'QUEUED','RUNNING'}:raise BridgeError('EXPORT_BUSY','导出执行中。')
+        if row['status'] in {'QUEUED','RUNNING'} or self.downloads[job]:raise BridgeError('EXPORT_BUSY','导出执行中。')
         shutil.rmtree(self.directory(job),ignore_errors=True)
         self.db.execute('DELETE FROM debug_exports WHERE id=? AND owner=?',(job,owner))
 

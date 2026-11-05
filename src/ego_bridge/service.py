@@ -100,7 +100,7 @@ class Service:
             return {"ok": True, "runtime": health, "active_operations": len(self.store.active()), "worker_error": self.last_worker_error}
         if tool == "diagnose" and not args.get("query_id"):
             return {"ok": True, "worker_running": bool(self.worker and not self.worker.done()), "last_worker_error": self.last_worker_error,
-                    "active_count": len(self.store.active()), "model_policy": "GPT-6 / extra_high, high only", "max_active": self.settings.max_active}
+                    "active_count": len(self.store.active()), "retention": {"policy":self.retention.policy(),"last_run":self.retention.last} if hasattr(self,"retention") else None, "model_policy": "GPT-6 / extra_high, high only", "max_active": self.settings.max_active}
         qid = args.get("query_id")
         q = self.store.query(owner, qid)
         op = self.store.operation(args["message_id"]) if args.get("message_id") else self.store.latest(owner, qid)
@@ -118,7 +118,10 @@ class Service:
                     result['outputs']=self.outputs(result)
             generation_complete=bool(op['result'] and op['result'].get('completeness_signal')=='complete')
             delivery_complete=bool(generation_complete and result.get('delivery_complete',True) and all(a['status']=='AVAILABLE' for a in result.get('artifacts',[])))
-            return {"ok": True, **self.view(op), "generation_complete":generation_complete,"delivery_complete":delivery_complete,
+            if op["result"] is not None:
+                result["delivery_complete"]=delivery_complete
+                if any(a["status"]=="EXPIRED" for a in result.get("artifacts",[])):result["delivery_phase"]="EXPIRED"
+            return {"ok": True, **self.view(op), "generation_complete":generation_complete,"delivery_complete":delivery_complete, "delivery_expired":any(a["status"]=="EXPIRED" for a in result.get("artifacts",[])),
                     "complete": op["status"] == "COMPLETED" and delivery_complete, "result": result or None}
         if tool == 'list_artifacts':
             return {'ok':True,'query_id':qid,'message_id':op['id'],'artifacts':self.artifacts.list(owner,op['id'])}

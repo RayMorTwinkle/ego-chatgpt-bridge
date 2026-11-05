@@ -13,7 +13,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, FileResponse
+from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
 from .adapter import EgoAdapter
@@ -118,6 +118,9 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
     from .webui import ui_routes
     web_routes,exports = ui_routes(service,clients,sessions=oauth.sessions if oauth else None)
     oauth_routes=oauth.routes() if oauth else []
+    from .retention import Retention, LeasedFileResponse
+    retention=Retention(service,exports)
+    service.retention=retention
     security = TransportSecuritySettings(allowed_hosts=[item for h in settings.allowed_hosts for item in (h, f"{h}:*")], allowed_origins=[])
     class BridgeMCP(FastMCP):
         async def list_tools(self):
@@ -244,9 +247,11 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
     async def lifespan(app):
         async with mcp.session_manager.run():
             await service.start()
+            retention.start()
             try:
                 yield
             finally:
+                await retention.stop()
                 await exports.stop()
                 await service.stop()
                 store.close()
@@ -263,11 +268,11 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
     async def download_artifact(request: Request):
         try:
             row,path=service.artifacts.available_path(request.state.owner,request.path_params['artifact_id'])
-            return FileResponse(path,filename=row['filename'],media_type=row['mime_type'],headers={
+            return LeasedFileResponse(path,leases=service.artifacts.downloads,lease_key=row['id'],filename=row['filename'],media_type=row['mime_type'],headers={
                 'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff',
                 'Content-Security-Policy':"default-src 'none'; sandbox",'ETag':'"'+row['sha256']+'"'})
         except BridgeError as error:
-            return JSONResponse({'ok':False,'error':error.data},status_code=404 if error.data['error_code']=='ARTIFACT_NOT_FOUND' else 409)
+            return JSONResponse({'ok':False,'error':error.data},status_code=404 if error.data['error_code']=='ARTIFACT_NOT_FOUND' else 410 if error.data['error_code']=='ARTIFACT_EXPIRED' else 409)
 
     app = Starlette(routes=[*oauth_routes,*web_routes,Route("/api/{tool}", api, methods=["POST"]),Route('/artifacts/{artifact_id}/content',download_artifact,methods=['GET','HEAD']), Mount("/", app=mcp_app)], lifespan=lifespan)
     app.state.service = service

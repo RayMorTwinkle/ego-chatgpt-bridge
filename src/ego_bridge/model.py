@@ -81,6 +81,12 @@ class Settings:
     oauth_issuer: str = ""
     oauth_redirect_hosts: tuple[str, ...] = ("chatgpt.com",)
     public_gateway_port: int = 0
+    artifact_retention_days: int = 14
+    export_retention_days: int = 14
+    log_retention_days: int = 14
+    log_max_bytes: int = 10*1024*1024
+    log_backup_count: int = 5
+    maintenance_interval_seconds: float = 3600
     artifact_max_bytes: int = 50 * 1024 * 1024
 
     @property
@@ -105,4 +111,8 @@ class Settings:
             raise ValueError("max_active must be 1..4")
         if result.oauth_issuer and (not 1 <= result.public_gateway_port <= 65535 or result.public_gateway_port==result.port):
             raise ValueError("OAuth requires a distinct public_gateway_port in 1..65535")
+        if any(type(v) is not int or v<1 for v in (result.artifact_retention_days,result.export_retention_days,result.log_retention_days,result.log_max_bytes,result.log_backup_count)):
+            raise ValueError('Retention limits must be positive integers')
+        if not 1<=result.maintenance_interval_seconds<=86400:
+            raise ValueError('maintenance_interval_seconds must be 1..86400')
         return result

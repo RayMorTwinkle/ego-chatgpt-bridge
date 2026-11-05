@@ -1,6 +1,7 @@
 """Private, content-verified artifacts. Remote callers never supply filesystem paths or URLs to fetch."""
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
 import json
 import mimetypes
@@ -52,7 +53,9 @@ def inspect_file(path: Path, name: str, max_bytes: int) -> dict:
 class Artifacts:
     def __init__(self, settings: Settings, store):
         self.settings, self.store = settings, store
+        self.downloads=Counter()
         self.root = settings.runtime / "artifacts"
+        if self.root.is_symlink():raise BridgeError('INVALID_STORAGE','产物目录不能是符号链接。')
         self.root.mkdir(mode=0o700, exist_ok=True)
         os.chmod(self.root, 0o700)
         store.db.executescript("""
@@ -62,6 +65,15 @@ class Artifacts:
             mime_type TEXT, kind TEXT, size_bytes INTEGER, sha256 TEXT, error TEXT, created_at REAL NOT NULL,
             updated_at REAL NOT NULL, UNIQUE(operation_id,source_key));
         """)
+        columns={r[1] for r in store.db.execute('PRAGMA table_info(artifacts)')}
+        if 'expires_at' not in columns:store.db.execute('ALTER TABLE artifacts ADD COLUMN expires_at REAL')
+        store.db.execute('UPDATE artifacts SET expires_at=updated_at+? WHERE expires_at IS NULL',(settings.artifact_retention_days*86400,))
+
+    def expire(self,artifact_id,*,at=None):
+        at=now() if at is None else at
+        self.store.db.execute("UPDATE artifacts SET status='EXPIRED',error=? WHERE id=?",(json.dumps(BridgeError('ARTIFACT_EXPIRED','产物已超过保留期，下载已停用；可尝试重新采集。',stage='artifact',action=True).data),artifact_id))
+        self.path(artifact_id).unlink(missing_ok=True)
+        self.path(artifact_id,temporary=True).unlink(missing_ok=True)
 
     def get(self, owner: str, artifact_id: str) -> dict:
         row = self.store.db.execute("""SELECT a.* FROM artifacts a JOIN operations o ON o.id=a.operation_id
@@ -78,10 +90,15 @@ class Artifacts:
     def public(self, row: dict) -> dict:
         result = {k: row[k] for k in ("id", "operation_id", "filename", "status", "mime_type", "kind", "size_bytes", "sha256")}
         result["artifact_id"] = result.pop("id")
-        result["download_url"] = self.settings.base_url + f"/artifacts/{row['id']}/content" if row["status"] == "AVAILABLE" else None
+        result['expires_at']=row.get('expires_at')
+        if result['expires_at'] is not None and result['expires_at']<=now():
+            result['status']='EXPIRED'
+            result['error']=json.dumps(BridgeError('ARTIFACT_EXPIRED','产物已超过保留期；可尝试重新采集。',stage='artifact',action=True).data)
+        result["download_url"] = self.settings.base_url + f"/artifacts/{row['id']}/content" if result["status"] == "AVAILABLE" else None
         result["requires_authentication"] = True
-        result['mcp_resource_uri']=f"ego-artifact://{row['id']}" if row['status']=='AVAILABLE' else None
-        result["error"] = json.loads(row["error"]) if row["error"] else None
+        result['mcp_resource_uri']=f"ego-artifact://{row['id']}" if result['status']=='AVAILABLE' else None
+        error=result.get("error") or row["error"]
+        result["error"] = json.loads(error) if error else None
         return result
 
     def list(self, owner: str, operation_id: str) -> list[dict]:
@@ -93,6 +110,8 @@ class Artifacts:
     def available_path(self, owner: str, artifact_id: str) -> tuple[dict, Path]:
         row = self.get(owner, artifact_id)
         path = self.path(artifact_id)
+        if row['status']=='EXPIRED' or row.get('expires_at') is not None and row['expires_at']<=now():
+            raise BridgeError('ARTIFACT_EXPIRED','产物已超过保留期；可尝试重新采集。',stage='artifact',action=True)
         if row["status"] != "AVAILABLE":
             raise BridgeError("ARTIFACT_NOT_READY", "产物尚不可下载。", stage="artifact")
         try:
@@ -112,17 +131,20 @@ class Artifacts:
                 row = dict(row)
             else:
                 art_id = identifier("art")
-                self.store.db.execute("INSERT INTO artifacts(id,operation_id,source_key,candidate,filename,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                                      (art_id, op["id"], key, json.dumps(candidate), filename(candidate["name"]), "PENDING", now(), now()))
+                self.store.db.execute("INSERT INTO artifacts(id,operation_id,source_key,candidate,filename,status,created_at,updated_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                                      (art_id, op["id"], key, json.dumps(candidate), filename(candidate["name"]), "PENDING", now(), now(),now()+self.settings.artifact_retention_days*86400))
                 row = self.get(op["owner"], art_id)
             destination = self.path(row["id"])
             temporary = self.path(row["id"], temporary=True)
             capture_receipt = None
             try:
+                if row['status']=='EXPIRED' or row.get('expires_at') is not None and row['expires_at']<=now():
+                    if self.downloads[row['id']]:continue
+                    self.expire(row['id']);row['status']='EXPIRED'
                 if row["status"] == "AVAILABLE":
                     self.available_path(op["owner"], row["id"])
                     continue
-                if row['status']=='FAILED':
+                if row['status'] in {'FAILED','EXPIRED'}:
                     destination.unlink(missing_ok=True)
                 # An interrupted rename/DB update can be reconciled without downloading again.
                 if not destination.exists():
@@ -143,8 +165,8 @@ class Artifacts:
                     try: os.fsync(directory_fd)
                     finally: os.close(directory_fd)
                 info = inspect_file(destination, row["filename"], self.settings.artifact_max_bytes)
-                self.store.db.execute("UPDATE artifacts SET status='AVAILABLE',mime_type=?,kind=?,size_bytes=?,sha256=?,error=NULL,updated_at=? WHERE id=?",
-                                      (info["mime_type"], info["kind"], info["size_bytes"], info["sha256"], now(), row["id"]))
+                self.store.db.execute("UPDATE artifacts SET status='AVAILABLE',mime_type=?,kind=?,size_bytes=?,sha256=?,error=NULL,updated_at=?,expires_at=? WHERE id=?",
+                                      (info["mime_type"], info["kind"], info["size_bytes"], info["sha256"], now(), now()+self.settings.artifact_retention_days*86400, row["id"]))
             except BridgeError as error:
                 if capture_receipt:
                     error.data['diagnostic_context']['capture_receipt']={k:v for k,v in capture_receipt.items() if k in {'transport','size_bytes','mime_type','provider_size_bytes'}}
@@ -158,6 +180,7 @@ class Artifacts:
     def delete_query(self, owner, query_id):
         self.store.query(owner, query_id)
         rows = list(self.store.db.execute("SELECT a.id FROM artifacts a JOIN operations o ON o.id=a.operation_id WHERE o.query_id=?", (query_id,)))
+        if any(self.downloads[r[0]] for r in rows):raise BridgeError('ARTIFACT_BUSY','产物正在下载，请稍后清理。')
         self.store.delete(owner, query_id)  # Verifies all operations are terminal before deleting metadata.
         for row in rows:
             self.path(row[0]).unlink(missing_ok=True)

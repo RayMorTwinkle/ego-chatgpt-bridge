@@ -40,7 +40,7 @@ class Supervisor:
         if interval<.1 or timeout<.1 or failures<1:raise ValueError('Invalid watchdog timing')
         self.runtime=runtime;self.interval=interval;self.timeout=timeout;self.threshold=failures
         self.stopping=threading.Event();self.child=None;self.restarts=0;self.last_reason=None
-        self.browser_status='not_checked';self.next_browser_check=0
+        self.browser_status='not_checked';self.next_browser_check=0;self.next_log_check=0;self.log_error=None
 
     def ensure_browser(self,settings):
         if not settings.start_ego or sys.platform!='darwin':return
@@ -55,9 +55,18 @@ class Supervisor:
             self.browser_status='launch_requested' if opened.returncode==0 else 'launch_failed'
         except (OSError,subprocess.TimeoutExpired):self.browser_status='launch_failed'
 
+    def maintain_logs(self,settings):
+        if time.monotonic()<self.next_log_check:return
+        self.next_log_check=time.monotonic()+60
+        try:
+            from .retention import rotate_logs
+            report=rotate_logs(settings)
+            self.log_error=report.get('errors') or None
+        except OSError as error:self.log_error=type(error).__name__
+
     def state(self,status,**extra):
         private_state(self.runtime/'supervisor.json',dict(supervisor_pid=os.getpid(),server_pid=self.child.pid if self.child and self.child.poll() is None else None,
-            status=status,restarts=self.restarts,last_reason=self.last_reason,browser=self.browser_status,updated_at=time.time(),**extra))
+            status=status,restarts=self.restarts,last_reason=self.last_reason,browser=self.browser_status,log_rotation_error=self.log_error,updated_at=time.time(),**extra))
 
     def stop_child(self):
         child=self.child
@@ -79,6 +88,7 @@ class Supervisor:
             try:
                 while not self.stopping.is_set():
                     settings=Settings.load(self.runtime)
+                    self.maintain_logs(settings)
                     if not network_ready(settings.host):
                         self.state('WAITING_FOR_NETWORK',host=settings.host);self.stopping.wait(self.interval);continue
                     token=load_clients(self.runtime)[settings.default_owner]
@@ -94,6 +104,7 @@ class Supervisor:
                             if self.child.poll() is not None:
                                 self.last_reason='SERVER_EXITED';break
                             self.ensure_browser(settings)
+                            self.maintain_logs(settings)
                             try:
                                 r=http.post(settings.base_url+'/api/diagnose',json={});r.raise_for_status();data=r.json()
                                 healthy=data.get('ok') and data.get('worker_running')

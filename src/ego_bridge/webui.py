@@ -13,6 +13,7 @@ from starlette.staticfiles import StaticFiles
 from .auth import BrowserSessions,COOKIE_NAME,HTTP_COOKIE_NAME,SESSION_SECONDS,env_values,token_owner
 from .exports import ExportJobs
 from .model import BridgeError
+from .retention import LeasedFileResponse
 
 
 def ui_routes(service,clients,sessions=None):
@@ -41,7 +42,7 @@ def ui_routes(service,clients,sessions=None):
             if request.method not in {'GET','HEAD'}:origin(request)
             return await callback(request)
         except BridgeError as error:
-            code=error.data['error_code'];status=401 if code=='LOGIN_REQUIRED' else 403 if code in {'ADMIN_REQUIRED','ORIGIN_NOT_ALLOWED'} else 404 if code in {'EXPORT_NOT_FOUND','ARTIFACT_NOT_FOUND'} else 400
+            code=error.data['error_code'];status=401 if code=='LOGIN_REQUIRED' else 403 if code in {'ADMIN_REQUIRED','ORIGIN_NOT_ALLOWED'} else 404 if code in {'EXPORT_NOT_FOUND','ARTIFACT_NOT_FOUND'} else 410 if code in {'EXPORT_EXPIRED','ARTIFACT_EXPIRED'} else 400
             return response({'ok':False,'error':error.data},status)
         except (ValueError,TypeError,KeyError,json.JSONDecodeError):
             return response({'ok':False,'error':{'error_code':'INVALID_ARGUMENT','message':'请求格式不正确。'}},400)
@@ -64,7 +65,7 @@ def ui_routes(service,clients,sessions=None):
     async def me(request):
         current=owner(request)
         return response({'ok':True,'owner':current,'admin':current==sessions.admin_owner,'project_name':settings.project_name,
-                         'base_url':settings.base_url,'model':'GPT-6','preferred_effort':'extra_high','runtime_path':str(settings.runtime) if current==sessions.admin_owner else None})
+                         'retention':service.retention.policy() if hasattr(service,'retention') else None,'base_url':settings.base_url,'model':'GPT-6','preferred_effort':'extra_high','runtime_path':str(settings.runtime) if current==sessions.admin_owner else None})
     async def tool(request):
         current=owner(request);name=request.path_params['name']
         if name not in allowed:raise BridgeError('UNKNOWN_TOOL','此入口不提供该操作。')
@@ -93,7 +94,7 @@ def ui_routes(service,clients,sessions=None):
     async def artifact(request):
         current=owner(request);row,path=service.artifacts.available_path(current,request.path_params['artifact_id'])
         image=row['mime_type'] in {'image/png','image/jpeg','image/gif','image/webp'} and request.query_params.get('download')!='1'
-        return FileResponse(path,filename=row['filename'],media_type=row['mime_type'],content_disposition_type='inline' if image else 'attachment',headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; sandbox"})
+        return LeasedFileResponse(path,leases=service.artifacts.downloads,lease_key=row['id'],filename=row['filename'],media_type=row['mime_type'],content_disposition_type='inline' if image else 'attachment',headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; sandbox"})
     async def exports(request):
         current=owner(request,admin=True)
         if request.method=='GET':return response({'ok':True,'exports':jobs.list(current)})
@@ -104,8 +105,9 @@ def ui_routes(service,clients,sessions=None):
         return response({'ok':True,'export':jobs.get(current,job)})
     async def export_download(request):
         current=owner(request,admin=True);job=request.path_params['export_id'];row=jobs.get(current,job)
+        if row['status']=='EXPIRED':raise BridgeError('EXPORT_EXPIRED','归档已超过保留期，请重新发起只读导出。')
         if not row['download_url']:raise BridgeError('EXPORT_NOT_READY','ZIP 尚未就绪。')
-        return FileResponse(jobs.directory(job)/'conversation.zip',filename=job+'.zip',media_type='application/zip',headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'})
+        return LeasedFileResponse(jobs.directory(job)/'conversation.zip',leases=jobs.downloads,lease_key=job,filename=job+'.zip',media_type='application/zip',headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'})
 
     return [Route('/',root),Route('/ui',root),Route('/ui/',index),Mount('/ui/assets',StaticFiles(directory=static)),
             route('/ui/api/login',login,['POST']),route('/ui/api/logout',logout,['POST']),route('/ui/api/me',me),
