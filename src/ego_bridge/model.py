@@ -78,6 +78,9 @@ class Settings:
     tls_enabled: bool = False
     allowed_hosts: tuple[str, ...] = ("localhost", "127.0.0.1")
     allowed_client_cidrs: tuple[str, ...] = ("127.0.0.0/8",)
+    oauth_issuer: str = ""
+    oauth_redirect_hosts: tuple[str, ...] = ("chatgpt.com",)
+    public_gateway_port: int = 0
     artifact_max_bytes: int = 50 * 1024 * 1024
 
     @property
@@ -94,10 +97,12 @@ class Settings:
     def load(cls, runtime: Path) -> Settings:
         path = runtime / "config.json"
         data = json.loads(path.read_text()) if path.exists() else {}
-        for key in ("allowed_hosts", "allowed_client_cidrs"):
+        for key in ("allowed_hosts", "allowed_client_cidrs", "oauth_redirect_hosts"):
             if key in data:
                 data[key] = tuple(data[key])
         result = cls(runtime=runtime, **data)
         if not 1 <= result.max_active <= 4:
             raise ValueError("max_active must be 1..4")
+        if result.oauth_issuer and (not 1 <= result.public_gateway_port <= 65535 or result.public_gateway_port==result.port):
+            raise ValueError("OAuth requires a distinct public_gateway_port in 1..65535")
         return result

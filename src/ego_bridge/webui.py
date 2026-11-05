@@ -15,10 +15,10 @@ from .exports import ExportJobs
 from .model import BridgeError
 
 
-def ui_routes(service,clients):
+def ui_routes(service,clients,sessions=None):
     settings=service.settings;values=env_values(settings.runtime)
     cookie_name=COOKIE_NAME if settings.tls_enabled else HTTP_COOKIE_NAME
-    sessions=BrowserSessions(clients,values.get('WEB_SESSION_SECRET') or secrets.token_urlsafe(48),values.get('EGO_BRIDGE_OWNER') or settings.default_owner)
+    sessions=sessions or BrowserSessions(clients,values.get('WEB_SESSION_SECRET') or secrets.token_urlsafe(48),values.get('EGO_BRIDGE_OWNER') or settings.default_owner)
     jobs=ExportJobs(service)
     static=Path(__file__).with_name('web')
     allowed={'create_query','continue_query','get_query_status','get_query_result','list_queries','health_check','diagnose','recover_session','retry_query','cancel_query','list_messages','get_conversation_info','delete_query','list_artifacts','collect_artifacts','get_artifact'}
@@ -75,6 +75,7 @@ def ui_routes(service,clients):
         current=owner(request);header='Bearer '+clients[current]
         return response({'ok':True,'mcp_url':settings.base_url+'/mcp','api_base_url':settings.base_url,
             'authorization':header,'tls_enabled':settings.tls_enabled,
+            'oauth_mcp_url':settings.oauth_issuer.rstrip('/')+'/mcp' if settings.oauth_issuer else None,
             'certificate_path':str(settings.runtime/'tls-cert.pem') if settings.tls_enabled else None,
             'certificate_download_url':'/ui/api/certificate' if settings.tls_enabled else None,
             'certificate_sha256':hashlib.sha256((settings.runtime/'tls-cert.pem').read_bytes()).hexdigest() if settings.tls_enabled and (settings.runtime/'tls-cert.pem').exists() else None,

@@ -21,10 +21,12 @@ from .model import Settings, BridgeError
 from .service import Service
 from .store import Store
 from .auth import load_clients
+from .oauth import PUBLIC_PATHS
 
 
 class TokenAuth:
-    def __init__(self, app, clients, allowed_client_cidrs):
+    def __init__(self, app, clients, allowed_client_cidrs, oauth=None):
+        self.oauth = oauth
         self.app, self.clients = app, clients
         self.networks = [ipaddress.ip_network(cidr) for cidr in allowed_client_cidrs]
 
@@ -44,22 +46,37 @@ class TokenAuth:
             permitted = any(peer in network for network in self.networks)
         except (ValueError, TypeError, KeyError):
             permitted = False
+        public = scope.get("state", {}).get("public_gateway", False)
+        if public and self.oauth:
+            permitted = True
         if not permitted:
             return await JSONResponse({"ok": False, "error": {"error_code": "SOURCE_NETWORK_DENIED"}}, status_code=403)(scope, receive, send)
         headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
         ui = scope.get('path') in {'/','/ui'} or scope.get('path','').startswith('/ui/')
-        owner = self.owner(headers.get("authorization", "")) if not ui else None
-        if not ui and not owner:
-            return await JSONResponse({"ok": False, "error": {"error_code": "UNAUTHORIZED", "message": "需要有效的调用方 Bearer token。"}}, status_code=401)(scope, receive, send)
+        path = scope.get('path','')
+        oauth_route = self.oauth and path in PUBLIC_PATHS - {'/mcp'}
+        token = headers.get('authorization','').removeprefix('Bearer ') if headers.get('authorization','').startswith('Bearer ') else ''
+        owner = self.owner(headers.get("authorization", "")) if not ui and not public and not oauth_route else None
+        scopes = None
+        if not owner and not ui and not oauth_route and self.oauth:
+            delegated = await self.oauth.load_access_token(token) if token else None
+            if delegated:
+                owner,scopes = delegated.subject,delegated.scopes
+        if not ui and not oauth_route and not owner:
+            return await JSONResponse({"ok": False, "error": {"error_code": "UNAUTHORIZED", "message": "需要有效的调用方 Bearer token。"}}, status_code=401, headers={"WWW-Authenticate":self.oauth.challenge()} if self.oauth else {})(scope, receive, send)
         # Native Agent clients do not send Origin. Browser-origin access is denied.
-        if not ui and "origin" in headers:
+        if not ui and not oauth_route and "origin" in headers:
             return await JSONResponse({"ok": False, "error": {"error_code": "ORIGIN_NOT_ALLOWED"}}, status_code=403)(scope, receive, send)
+        max_body=16384 if oauth_route else 1024*1024
         try:
-            if int(headers.get("content-length", "0")) > 1024 * 1024:
+            if int(headers.get("content-length", "0")) > max_body:
                 return await JSONResponse({"error": "REQUEST_TOO_LARGE"}, status_code=413)(scope, receive, send)
         except ValueError:
             return await JSONResponse({"error": "INVALID_CONTENT_LENGTH"}, status_code=400)(scope, receive, send)
         scope.setdefault("state", {})["owner"] = owner
+        scope["state"]["oauth_scopes"] = scopes
+        if scopes is not None and scope['method'] in {'GET','HEAD'} and 'research:read' not in scopes:
+            return await JSONResponse({'error':'insufficient_scope'},status_code=403)(scope,receive,send)
         if scope.get("method") == "POST":
             body = bytearray()
             while True:
@@ -67,10 +84,20 @@ class TokenAuth:
                 if message["type"] == "http.disconnect":
                     return
                 body.extend(message.get("body", b""))
-                if len(body) > 1024 * 1024:
+                if len(body) > max_body:
                     return await JSONResponse({"error": "REQUEST_TOO_LARGE"}, status_code=413)(scope, receive, send)
                 if not message.get("more_body"):
                     break
+            if scopes is not None:
+                from .oauth import WRITE_TOOLS
+                required = 'research:read'
+                try:
+                    data=json.loads(body)
+                    name=path.split('/')[-1] if path.startswith('/api/') else data.get('params',{}).get('name') if data.get('method')=='tools/call' else None
+                    if name in WRITE_TOOLS:required='research:write'
+                except (ValueError,TypeError,AttributeError):pass
+                if required not in scopes:
+                    return await JSONResponse({'error':'insufficient_scope'},status_code=403,headers={'WWW-Authenticate':self.oauth.challenge()+', error="insufficient_scope", scope="'+required+'"'})(scope,receive,send)
             delivered = False
             async def replay_receive():
                 nonlocal delivered
@@ -86,10 +113,25 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
     clients = clients or load_clients(settings.runtime)
     store = store or Store(settings.runtime)
     service = Service(settings, store, adapter or EgoAdapter(settings))
+    from .oauth import OAuthProvider
+    oauth = OAuthProvider(settings,store,clients) if settings.oauth_issuer else None
     from .webui import ui_routes
-    web_routes,exports = ui_routes(service,clients)
+    web_routes,exports = ui_routes(service,clients,sessions=oauth.sessions if oauth else None)
+    oauth_routes=oauth.routes() if oauth else []
     security = TransportSecuritySettings(allowed_hosts=[item for h in settings.allowed_hosts for item in (h, f"{h}:*")], allowed_origins=[])
-    mcp = FastMCP("Ego ChatGPT Bridge", stateless_http=True, json_response=True, transport_security=security)
+    class BridgeMCP(FastMCP):
+        async def list_tools(self):
+            from .oauth import WRITE_TOOLS
+            tools=await super().list_tools()
+            for tool in tools:
+                write=tool.name in WRITE_TOOLS
+                tool.annotations=types.ToolAnnotations(readOnlyHint=not write,destructiveHint=tool.name=='delete_query',openWorldHint=write)
+                if oauth:
+                    schemes=[{'type':'oauth2','scopes':['research:read','research:write'] if write else ['research:read']}]
+                    tool.meta={**(tool.meta or {}),'securitySchemes':schemes}
+                    tool.model_extra['securitySchemes']=schemes
+            return tools
+    mcp = BridgeMCP("Ego ChatGPT Bridge", stateless_http=True, json_response=True, transport_security=security)
 
     async def call(ctx: Context, name: str, args: dict):
         # Use request state, not a global user/session variable: sessions must not leak ownership.
@@ -227,8 +269,9 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
         except BridgeError as error:
             return JSONResponse({'ok':False,'error':error.data},status_code=404 if error.data['error_code']=='ARTIFACT_NOT_FOUND' else 409)
 
-    app = Starlette(routes=[*web_routes,Route("/api/{tool}", api, methods=["POST"]),Route('/artifacts/{artifact_id}/content',download_artifact,methods=['GET','HEAD']), Mount("/", app=mcp_app)], lifespan=lifespan)
+    app = Starlette(routes=[*oauth_routes,*web_routes,Route("/api/{tool}", api, methods=["POST"]),Route('/artifacts/{artifact_id}/content',download_artifact,methods=['GET','HEAD']), Mount("/", app=mcp_app)], lifespan=lifespan)
     app.state.service = service
+    app.state.oauth = oauth
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts))
-    app.add_middleware(TokenAuth, clients=clients, allowed_client_cidrs=settings.allowed_client_cidrs)
+    app.add_middleware(TokenAuth, clients=clients, allowed_client_cidrs=settings.allowed_client_cidrs, oauth=oauth)
     return app

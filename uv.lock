@@ -225,7 +225,7 @@ wheels = [
 
 [[package]]
 name = "ego-chatgpt-bridge"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -245,7 +245,7 @@ dev = [
 requires-dist = [
     { name = "cryptography", specifier = ">=46,<49" },
     { name = "httpx", specifier = ">=0.28,<1" },
-    { name = "mcp", specifier = ">=1.26,<2" },
+    { name = "mcp", specifier = ">=1.30,<2" },
     { name = "python-dotenv", specifier = ">=1,<2" },
     { name = "uvicorn", specifier = ">=0.35,<1" },
 ]

@@ -14,7 +14,6 @@ import time
 from pathlib import Path
 
 import httpx
-import uvicorn
 
 from .model import TERMINAL, Settings, BridgeError
 from .auth import load_clients, save_clients, env_values
@@ -164,9 +163,8 @@ def _main():
         app = build_app(settings)
         private_json(runtime / "process.json", {"pid": os.getpid(), "port": args.port or settings.port})
         try:
-            tls={'ssl_certfile':str(runtime/'tls-cert.pem'),'ssl_keyfile':str(runtime/'tls-key.pem')} if settings.tls_enabled else {}
-            uvicorn.run(app, host=args.host or settings.host, port=args.port or settings.port,**tls,
-                        access_log=False, log_level="warning", timeout_graceful_shutdown=10, proxy_headers=False)
+            from .gateway import serve_apps
+            asyncio.run(serve_apps(app,settings,args.host,args.port))
         finally:
             (runtime / "process.json").unlink(missing_ok=True)
         return

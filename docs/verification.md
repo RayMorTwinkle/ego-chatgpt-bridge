@@ -1,3 +1,15 @@
+## OAuth／公网入口验收（2026-11-05，v0.4）
+
+- 77 项自动化测试通过，包括 public client 撤销、PKCE、授权码重放、refresh 重放撤销、audience、作用域、身份隔离、CSRF、管理 token 轮换和过期凭证、公开路由及注册请求边界。
+- 真实可信 HTTPS → Cloudflare → nginx → frp → 独立回环网关：discovery、DCR、PKCE、私网 consent、MCP initialize、17 个工具、读取13条历史研究均通过。
+- 通过公网 OAuth MCP 读取 CSV(26B)、DOCX(36638B)、PNG(3081B)、PDF(26305B)、原生图片PNG(1168592B)，大小及 SHA-256 全部与本机原件一致。图片以 MCP ImageContent 返回。测试连接使用只读 scope，创建请求被403拒绝。
+- refresh 换新与 /revoke 实测通过，撤销后原 access token 401。临时测试授权已清理。复现脚本 `scripts/verify_oauth.py`；详细报告仅保留私有运行目录 verification。
+- 公网 WebUI、REST API、调试导出404；旧管理 token 不能通过公网 MCP。EasyTier 的原有 HTTP/token 登录保持可用，不需自签CA。
+- 服务器和本机监督器健康、frp/HTTPS Kuma监控UP、每日私有SQLite+产物备份已安装并实际校验一次。
+- ChatGPT 创建自定义 MCP、识别 OAuth、DCR 和跳转私网确认页均已发生。浏览器实测发现 Referrer Policy 与 CSP 回调限制并已修正；修正后的 ChatGPT 回调仍待验收；SDK public-client revoke兼容问题已修正。**当前最后一次 ChatGPT 连接验收被人类验证码中断，尚不能认定 ChatGPT 完成连接或实际展示了文件。**
+
+以上不将协议客户端成功等同于 ChatGPT 客户端完整验收。
+
 # 验证范围
 
 2026-11-05，v0.3.0。真实网页、真实协议与模拟故障分开记录；自动化测试 70 项通过。

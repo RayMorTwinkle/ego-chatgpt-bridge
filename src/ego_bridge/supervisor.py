@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -96,6 +97,9 @@ class Supervisor:
                             try:
                                 r=http.post(settings.base_url+'/api/diagnose',json={});r.raise_for_status();data=r.json()
                                 healthy=data.get('ok') and data.get('worker_running')
+                                if healthy and settings.oauth_issuer:
+                                    gateway=http.get(f'http://127.0.0.1:{settings.public_gateway_port}/.well-known/oauth-protected-resource/mcp',headers={'Authorization':'','Host':urlsplit(settings.oauth_issuer).netloc})
+                                    healthy=gateway.status_code==200 and gateway.json().get('resource')==settings.oauth_issuer.rstrip('/')+'/mcp'
                             except (httpx.HTTPError,ValueError):healthy=False
                             bad=0 if healthy else bad+1
                             self.state('HEALTHY' if healthy else 'PROBE_FAILED',consecutive_failures=bad)

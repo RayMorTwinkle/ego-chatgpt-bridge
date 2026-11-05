@@ -75,6 +75,10 @@ stdio 客户端使用 `~/apps/ego-chatgpt-bridge/.venv/bin/ego-bridge stdio`，�
 
 `--wait` 只是等待；退出客户端不取消后台任务。每个调用身份只能访问自己的任务和产物。主身份可通过 WebUI 执行账户级调试导出，额外 Agent 身份没有该权限。
 
+## ChatGPT OAuth 接入
+
+可启用独立公网 HTTPS MCP／OAuth 入口，同时将 WebUI 保持在 EasyTier 内。支持 PKCE、独立凭证、权限限制、刷新和撤销；授权确认在私网工作台完成。公网不接受管理 token。部署及限制见 [OAuth 文档](docs/oauth.md)。
+
 ## 产物交付
 
 结果分开返回 `generation_complete`、`delivery_complete` 和 `complete`。文字结束不等于文件可下载。
