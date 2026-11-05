@@ -73,14 +73,19 @@ def ui_routes(service,clients,sessions=None):
         return response(await service.dispatch(current,name,data))
     async def mcp_info(request):
         current=owner(request);header='Bearer '+clients[current]
+        private_configuration={'mcpServers':{'ego-research':{'url':settings.base_url+'/mcp','headers':{'Authorization':header}}}}
+        public_url=settings.oauth_issuer.rstrip('/')+'/mcp' if settings.oauth_issuer else None
+        public_configuration={'mcpServers':{'ego-research-public':{'url':public_url}}} if public_url else None
         return response({'ok':True,'mcp_url':settings.base_url+'/mcp','api_base_url':settings.base_url,
             'authorization':header,'tls_enabled':settings.tls_enabled,
-            'oauth_mcp_url':settings.oauth_issuer.rstrip('/')+'/mcp' if settings.oauth_issuer else None,
+            'oauth_mcp_url':public_url,'oauth_configuration':public_configuration,
+            'connections':{'easytier':{'url':settings.base_url+'/mcp','authentication':'bearer','recommended':True,'configuration':private_configuration},
+                           'public':{'url':public_url,'authentication':'oauth','recommended':False,'configuration':public_configuration}},
             'certificate_path':str(settings.runtime/'tls-cert.pem') if settings.tls_enabled else None,
             'certificate_download_url':'/ui/api/certificate' if settings.tls_enabled else None,
             'certificate_sha256':hashlib.sha256((settings.runtime/'tls-cert.pem').read_bytes()).hexdigest() if settings.tls_enabled and (settings.runtime/'tls-cert.pem').exists() else None,
             'token_file':str(settings.runtime/'.env') if current==sessions.admin_owner else None,
-            'configuration':{'mcpServers':{'ego-research':{'url':settings.base_url+'/mcp','headers':{'Authorization':header}}}}})
+            'configuration':private_configuration})
     async def certificate(request):
         owner(request)
         if not settings.tls_enabled:return response({'ok':False,'error':{'error_code':'TLS_DISABLED','message':'当前使用 EasyTier 内 HTTP，无需 CA 证书。'}},404)

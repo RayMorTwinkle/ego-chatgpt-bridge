@@ -14,7 +14,31 @@
 <footer><span id="runtime-path"></span><span>原始字节 · 明确状态 · 可恢复</span></footer>
 </main></div></div>
 <dialog id="new-dialog"><form id="create-form"><div class="dialog-heading"><h2>新建研究</h2><button type="button" class="close quiet" data-close="new-dialog" aria-label="关闭">×</button></div><label for="question">研究问题</label><textarea id="question" rows="7" required placeholder="描述你想深入研究的问题、约束和期待的产物……"></textarea><div class="form-bottom"><label class="effort-label">GPT-6 <select id="effort"><option value="extra_high">极高思考</option><option value="high">高思考</option></select></label><button class="primary" type="submit">创建研究 ↑</button></div></form></dialog>
-<dialog id="mcp-dialog"><div class="dialog-heading"><div><p class="eyebrow">AGENT CONNECTION</p><h2>MCP 接入</h2></div><button class="close quiet" data-close="mcp-dialog" aria-label="关闭">×</button></div><p class="muted">将配置复制给你的 Agent。配置包含当前登录身份的私密 token。</p><label for="mcp-url">服务地址</label><input id="mcp-url" readonly><label for="mcp-config">MCP 配置</label><textarea id="mcp-config" rows="12" readonly spellcheck="false"></textarea><p id="connection-hint" class="small muted"></p><div id="certificate-section" hidden><p id="certificate-path" class="small muted"></p><a id="certificate-download" href="/ui/api/certificate" class="text-link">下载公有 CA 证书 ↗</a><p class="small muted">仅在主动启用自签 HTTPS 时需要信任此证书。</p></div><p id="token-path" class="small muted"></p><div class="button-row"><button id="mcp-copy" class="primary">复制配置</button><button id="token-copy" class="secondary">复制 Token</button></div><section id="oauth-section" hidden><h3>ChatGPT／OAuth 接入</h3><p class="small muted">选择 OAuth，填写下面的公网 MCP 地址。授权确认页只在 EasyTier 内打开。</p><input id="oauth-url" readonly aria-label="OAuth MCP 地址"><button id="oauth-copy" class="secondary">复制 OAuth 地址</button><h3>已授权应用</h3><div id="oauth-grants"></div></section><p id="copy-status" class="small" aria-live="polite"></p></dialog>
+<dialog id="mcp-dialog" aria-labelledby="mcp-title">
+<div class="dialog-heading"><div><p class="eyebrow">AGENT CONNECTION</p><h2 id="mcp-title">选择 MCP 接入方式</h2></div><button class="close quiet" data-close="mcp-dialog" aria-label="关闭">×</button></div>
+<p class="muted">能连接 EasyTier 时优先直连；不在虚拟网内的 Agent 使用公网入口。</p>
+<div class="connection-grid">
+<section class="connection-card" aria-labelledby="easytier-title"><div class="connection-heading"><h3 id="easytier-title">EasyTier 直连</h3><span class="badge">优先使用</span></div>
+<p class="small muted">传统 Bearer Token · 需要 Agent 接入 EasyTier</p><p class="small muted">直接连接本机服务，省去公网中转；实际速度取决于当前网络。</p>
+<label for="mcp-url">EasyTier MCP 地址</label><input id="mcp-url" readonly spellcheck="false"><button id="mcp-url-copy" class="quiet">复制直连地址</button>
+<label for="mcp-config">Token 接入配置</label><textarea id="mcp-config" class="connection-config" rows="10" readonly spellcheck="false"></textarea>
+<div class="button-row"><button id="mcp-copy" class="primary">复制 Token 配置</button><button id="token-copy" class="secondary">复制 Token</button></div>
+<p id="connection-hint" class="small muted"></p>
+<div id="certificate-section" hidden><p id="certificate-path" class="small muted"></p><a id="certificate-download" href="/ui/api/certificate" class="text-link">下载公有 CA 证书 ↗</a><p class="small muted">仅在主动启用自签 HTTPS 时需要信任此证书。</p></div>
+</section>
+<section class="connection-card" aria-labelledby="public-title"><div class="connection-heading"><h3 id="public-title">公网 HTTPS</h3><span class="badge">备用入口</span></div>
+<p class="small muted">OAuth 授权 · 适合 ChatGPT 及无法接入 EasyTier 的 Agent</p>
+<p class="small muted">Agent 无需加入 EasyTier；授权确认时，你使用的浏览器仍需连接 EasyTier。</p>
+<p id="public-unavailable" class="notice" hidden>尚未启用公网接入，当前可使用 EasyTier 直连。</p>
+<div id="oauth-section"><label for="oauth-url">公网 MCP 地址</label><input id="oauth-url" readonly spellcheck="false"><button id="oauth-copy" class="quiet">复制公网地址</button>
+<label for="oauth-config">OAuth 接入配置</label><textarea id="oauth-config" class="connection-config" rows="10" readonly spellcheck="false"></textarea>
+<button id="oauth-config-copy" class="primary">复制 OAuth 配置</button>
+<p class="small muted">支持 OAuth 的 MCP 客户端可使用此配置并完成登录。ChatGPT 中填写公网地址，认证选择 OAuth。</p></div>
+</section></div>
+<section id="credential-section" class="connection-details" hidden><h3>传统凭据</h3><p class="small muted">传统 Token 接入继续保留，与 OAuth 授权共存。Token 和 WebUI 登录凭据保存在本机文件中。</p><label for="token-path">凭据文件路径</label><input id="token-path" readonly spellcheck="false"><button id="token-path-copy" class="quiet">复制凭据路径</button></section>
+<section id="oauth-grants-section" class="connection-details" hidden><h3>OAuth 已授权应用</h3><div id="oauth-grants"></div></section>
+<p id="copy-status" class="small" aria-live="polite"></p><textarea id="manual-copy" rows="4" readonly hidden aria-label="手动复制内容" spellcheck="false"></textarea>
+</dialog>
 <dialog id="diagnose-dialog"><div class="dialog-heading"><h2>诊断记录</h2><button class="close quiet" data-close="diagnose-dialog" aria-label="关闭">×</button></div><pre id="diagnose-text"></pre></dialog>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 </body></html>

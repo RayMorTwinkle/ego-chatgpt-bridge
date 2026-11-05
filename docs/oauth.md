@@ -39,3 +39,5 @@
 公网 OAuth 请求设有独立速率和16 KiB正文上限；DCR最多1000个客户端，pending请求会清理过期记录并限制总数。达到容量时返回明确失败，管理员可检查私有数据库，不会自动删除仍在使用的客户端。
 
 公网入口只提供 MCP。当前基于 REST 的 `ego-bridge call/download` 继续走 EasyTier；Codex 等 Agent 可以通过公网 OAuth MCP 使用工具和资源。
+
+WebUI 的“MCP 接入”并列展示 EasyTier Token 配置与公网 OAuth 配置，地址和配置分别复制。直连优先，速度取决于实际链路；复制公网 OAuth JSON 不会附带长期管理 Token。传统 Token 和 `.env` 凭据路径继续保留。

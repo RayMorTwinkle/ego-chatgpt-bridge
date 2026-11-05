@@ -110,6 +110,11 @@ async def test_consent_csrf_scope_owner_and_revoke(oauth):
         r=await private.post('/api/list_queries',json={},headers=bearer)
         assert r.status_code==200 and r.json()['queries']==[]
         assert (await private.get('/ui/api/me',headers=bearer)).json()['owner']=='bob' # consent establishes bob cookie
+        info=(await private.post('/ui/api/mcp-info',json={})).json()
+        assert info['connections']['easytier']['configuration']['mcpServers']['ego-research']['headers']['Authorization']=='Bearer '+'b'*40
+        public_config=info['oauth_configuration']
+        assert public_config['mcpServers']['ego-research-public']=={'url':RESOURCE}
+        assert TOKEN not in json.dumps(public_config) and 'b'*40 not in json.dumps(public_config)
         grants=await private.get('/ui/api/oauth/grants')
         gid=grants.json()['grants'][0]['id']
         assert (await private.post('/ui/api/oauth/grants',json={'id':gid})).status_code==403

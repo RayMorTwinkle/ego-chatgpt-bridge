@@ -33,14 +33,54 @@ $('continue-form').onsubmit=async event=>{event.preventDefault();event.submitter
 for(const [id,name] of [['recover','recover_session'],['retry','retry_query'],['collect','collect_artifacts'],['cancel','cancel_query']])$(id).onclick=async()=>{const button=$(id);button.disabled=true;try{const r=await tool(name,{query_id:state.query,...(state.message?{message_id:state.message}:{})});toast(name==='cancel_query'&&!r.cancelled?'已尝试停止；请以任务后续状态为准。':'操作已执行。');await loadQueries();await loadDetail();}catch(error){toast(error.message);}finally{button.disabled=false;}};
 $('diagnose').onclick=async()=>{try{const r=await tool('diagnose',{query_id:state.query,...(state.message?{message_id:state.message}:{})});$('diagnose-text').textContent=JSON.stringify(r,null,2);$('diagnose-dialog').showModal();}catch(error){toast(error.message);}};
 $('health').onclick=async()=>{const button=$('health');button.disabled=true;$('health-status').textContent='正在核对专用空间…';try{const r=await tool('health_check');$('health-status').textContent=r.runtime.healthy?'浏览器与账户可用':'需要查看配置与模型状态';}catch(error){$('health-status').textContent=error.message;}finally{button.disabled=false;}};
-$('mcp-open').onclick=async()=>{try{state.mcp=await api('mcp-info',{});$('mcp-url').value=state.mcp.mcp_url;$('mcp-config').value=JSON.stringify(state.mcp.configuration,null,2);$('connection-hint').textContent=state.mcp.tls_enabled?'已启用 HTTPS。':'EasyTier 内 HTTP：复制地址和 token 即可接入。';$('certificate-section').hidden=!state.mcp.tls_enabled;$('certificate-path').textContent=state.mcp.certificate_path?'客户端证书：'+state.mcp.certificate_path:'';$('token-path').textContent=state.mcp.token_file?'Token 保存在 '+state.mcp.token_file:'';$('copy-status').textContent='';$('oauth-section').hidden=!state.mcp.oauth_mcp_url;$('oauth-url').value=state.mcp.oauth_mcp_url||'';if(state.mcp.oauth_mcp_url)await loadGrants();$('mcp-dialog').showModal();}catch(error){toast(error.message);}};
-async function copy(text){try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);}else{const field=$('mcp-config'),original=field.value;try{field.value=text;field.focus();field.select();if(!document.execCommand('copy'))throw Error('Copy unavailable');}finally{field.value=original;}}$('copy-status').textContent='已复制。';}catch{$('mcp-config').focus();$('mcp-config').select();$('copy-status').textContent='浏览器未允许自动复制，请选中文本后复制。';}}
-$('mcp-copy').onclick=()=>copy($('mcp-config').value);$('token-copy').onclick=()=>copy(state.mcp.authorization.slice(7));
+$('mcp-open').onclick=async()=>{
+  try{
+    state.mcp=await api('mcp-info',{});
+    $('mcp-url').value=state.mcp.mcp_url;
+    $('mcp-config').value=JSON.stringify(state.mcp.configuration,null,2);
+    $('connection-hint').textContent=state.mcp.tls_enabled?'直连已启用 HTTPS。Token 配置包含当前身份的私密凭据。':'EasyTier 内 HTTP 无需导入 CA。Token 配置包含当前身份的私密凭据。';
+    $('certificate-section').hidden=!state.mcp.tls_enabled;
+    $('certificate-path').textContent=state.mcp.certificate_path?'客户端证书：'+state.mcp.certificate_path:'';
+    $('credential-section').hidden=!state.mcp.token_file;
+    $('token-path').value=state.mcp.token_file||'';
+    const enabled=Boolean(state.mcp.oauth_mcp_url);
+    $('public-unavailable').hidden=enabled;
+    $('oauth-section').hidden=!enabled;
+    $('oauth-grants-section').hidden=!enabled;
+    $('oauth-url').value=state.mcp.oauth_mcp_url||'';
+    $('oauth-config').value=enabled?JSON.stringify(state.mcp.oauth_configuration,null,2):'';
+    $('copy-status').textContent='';$('manual-copy').value='';$('manual-copy').hidden=true;
+    $('mcp-dialog').showModal();
+    if(enabled){$('oauth-grants').textContent='正在读取授权…';loadGrants().catch(()=>{$('oauth-grants').textContent='暂时无法读取授权记录，请稍后重新打开。';});}
+  }catch(error){toast(error.message);}
+};
+async function copy(text,sourceId){
+  if(!text)return;
+  $('manual-copy').value='';$('manual-copy').hidden=true;
+  try{
+    if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(text);}
+    else{
+      const field=$(sourceId),original=field.value;
+      try{field.value=text;field.focus();field.select();if(!document.execCommand('copy'))throw Error('Copy unavailable');}
+      finally{field.value=original;}
+    }
+    $('copy-status').textContent='已复制。';
+  }catch{
+    const field=$('manual-copy');field.hidden=false;field.value=text;field.focus();field.select();
+    $('copy-status').textContent='自动复制不可用，请复制下面已选中的内容。';
+  }
+}
+$('mcp-copy').onclick=()=>copy($('mcp-config').value,'mcp-config');
+$('mcp-url-copy').onclick=()=>copy($('mcp-url').value,'mcp-url');
+$('token-copy').onclick=()=>copy(state.mcp.authorization.slice(7),'mcp-config');
+$('oauth-copy').onclick=()=>copy($('oauth-url').value,'oauth-url');
+$('oauth-config-copy').onclick=()=>copy($('oauth-config').value,'oauth-config');
+$('token-path-copy').onclick=()=>copy($('token-path').value,'token-path');
+$('mcp-dialog').addEventListener('close',()=>{$('manual-copy').value='';$('manual-copy').hidden=true;});
 $('export-form').onsubmit=async event=>{event.preventDefault();event.submitter.disabled=true;try{await api('exports',{conversation_url:$('export-url').value,request_id:uid()});toast('只读导出已加入队列。');await loadExports();}catch(error){toast(error.message);}finally{event.submitter.disabled=false;}};
 async function loadExports(){if(!state.admin)return;const r=await api('exports');const list=$('export-list');list.replaceChildren();if(!r.exports.length){list.append(node('div','暂无导出记录。','empty'));return;}for(const job of r.exports){const item=node('div',undefined,'export-job');const head=node('div',undefined,'task-head');head.append(node('span',labels[job.status]||job.status,statusClass(job.status)),node('span',date(job.created_at),'small muted'));item.append(head,node('div',job.url,'job-url'));if(job.manifest)item.append(node('p','已读取 '+job.manifest.turn_count+' 轮 · '+job.manifest.artifacts.filter(a=>a.status==='AVAILABLE').length+' 个可用产物'));if(job.error)item.append(node('p',job.error.message||job.error.error_code,'error'));if(job.manifest?.warnings?.length)item.append(node('p',job.manifest.warnings.join(' '),'small muted'));const actions=node('div',undefined,'button-row');if(job.download_url){const a=node('a','下载 ZIP ↗','text-link');a.href=job.download_url;actions.append(a);}if(!['QUEUED','RUNNING'].includes(job.status)){const remove=node('button','清理','quiet');remove.onclick=async()=>{try{await api('exports/'+job.id,undefined,'DELETE');await loadExports();}catch(error){toast(error.message);}};actions.append(remove);}item.append(actions);list.append(item);}}
 $('export-refresh').onclick=()=>loadExports().catch(e=>toast(e.message));
 let refreshing=false;setInterval(async()=>{if(!state.owner||refreshing)return;refreshing=true;try{if(state.view==='queries'){await loadQueries();if(state.query)await loadDetail();}else await loadExports();}catch(error){if(state.owner)toast(error.message);}finally{refreshing=false;}},5000);
 enter();
 
-$('oauth-copy').onclick=()=>copy($('oauth-url').value);
 async function loadGrants(){const r=await api('oauth/grants');const list=$('oauth-grants');list.replaceChildren();for(const grant of r.grants){const row=node('div',undefined,'button-row');row.append(node('span',grant.client_name+' · '+(grant.revoked?'已撤销':grant.scopes.join(', '))));if(!grant.revoked){const button=node('button','撤销','quiet');button.onclick=async()=>{try{await api('oauth/grants',{id:grant.id});await loadGrants();}catch(error){toast(error.message);}};row.append(button);}list.append(row);}if(!r.grants.length)list.append(node('p','暂无授权。','small muted'));}

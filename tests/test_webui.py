@@ -49,6 +49,8 @@ async def test_web_login_cookie_mcp_info_csrf_and_logout(tmp_path):
             assert (await c.post('/ui/api/mcp-info',json={},headers={'Origin':'https://evil.example'})).status_code==403
             info=(await c.post('/ui/api/mcp-info',json={})).json();assert info['authorization']=='Bearer '+'a'*40
             assert info['configuration']['mcpServers']['ego-research']['headers']['Authorization']==info['authorization']
+            assert info['connections']['easytier']['configuration']==info['configuration']
+            assert info['oauth_configuration'] is None and info['connections']['public']['url'] is None
             await c.post('/ui/api/logout',json={});assert (await c.get('/ui/api/me')).status_code==401
 
 
