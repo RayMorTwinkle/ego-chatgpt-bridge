@@ -7,7 +7,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from .model import ACTIVE, TERMINAL, TRANSITIONS, BridgeError, digest, identifier, now
+from .model import ACTIVE, TERMINAL, TRANSITIONS, BridgeError, digest, identifier, now, provisional_conversation
 
 
 class Store:
@@ -137,9 +137,10 @@ class Store:
         fields["updated_at"] = now()
         self.db.execute(f"UPDATE operations SET {','.join(k+'=?' for k in fields)} WHERE id=?", (*fields.values(), op_id))
 
-    def bind_conversation(self, query_id: str, url: str, conversation_id: str, space_id: int | None = None):
-        row = self.db.execute("SELECT conversation_url FROM queries WHERE id=?", (query_id,)).fetchone()
-        if row[0] and row[0] != url:
+    def bind_conversation(self, query_id: str, url: str, conversation_id: str, space_id: int | None = None, *, promote_provisional=False):
+        row = self.db.execute("SELECT conversation_url,conversation_id FROM queries WHERE id=?", (query_id,)).fetchone()
+        allowed_promotion=promote_provisional and provisional_conversation(row[1]) and not provisional_conversation(conversation_id)
+        if row[0] and row[0] != url and not allowed_promotion:
             raise BridgeError("CONVERSATION_MISMATCH", "会话地址与持久化映射不一致。", action=True)
         self.db.execute("UPDATE queries SET conversation_url=?,conversation_id=?,space_id=COALESCE(?,space_id),updated_at=? WHERE id=?", (url, conversation_id, space_id, now(), query_id))
 

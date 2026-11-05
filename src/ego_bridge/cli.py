@@ -16,7 +16,7 @@ from pathlib import Path
 import httpx
 import uvicorn
 
-from .model import TERMINAL, Settings
+from .model import TERMINAL, Settings, BridgeError
 from .auth import load_clients, save_clients, env_values
 
 DEFAULT_RUNTIME = Path(os.environ.get("EGO_BRIDGE_RUNTIME", str(Path.home()/"apps/ego-chatgpt-bridge")))
@@ -41,7 +41,7 @@ def initialize(runtime: Path, *, renew_tls: bool = False):
         owner=Settings.load(runtime).default_owner
         if owner not in clients:owner=next(iter(clients))
         save_clients(runtime,clients,owner)
-    if renew_tls or not (runtime / "tls-cert.pem").exists():
+    if renew_tls or (Settings.load(runtime).tls_enabled and not (runtime / "tls-cert.pem").exists()):
         from cryptography import x509
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
@@ -73,8 +73,8 @@ async def stdio_proxy(settings, owner):
     from mcp.client.session import ClientSession
     from mcp.client.streamable_http import streamable_http_client
     token = load_clients(settings.runtime)[owner]
-    ssl_context = ssl.create_default_context(cafile=str(settings.runtime / "tls-cert.pem"))
-    async with httpx.AsyncClient(verify=ssl_context, headers={"Authorization": f"Bearer {token}"}, timeout=90) as http:
+    ssl_context = ssl.create_default_context(cafile=str(settings.runtime / "tls-cert.pem")) if settings.tls_enabled else True
+    async with httpx.AsyncClient(verify=ssl_context, headers={"Authorization": f"Bearer {token}"}, timeout=90,trust_env=False) as http:
         async with streamable_http_client(settings.base_url + "/mcp", http_client=http) as (read, write, _):
             async with ClientSession(read, write) as remote:
                 await remote.initialize()
@@ -85,16 +85,32 @@ async def stdio_proxy(settings, owner):
                 @proxy.call_tool()
                 async def call(name: str, arguments: dict):
                     return await remote.call_tool(name, arguments)
+                @proxy.list_resources()
+                async def resources():return (await remote.list_resources()).resources
+                @proxy.list_resource_templates()
+                async def templates():return (await remote.list_resource_templates()).resourceTemplates
+                @proxy.read_resource()
+                async def resource(uri):
+                    from mcp.server.lowlevel.helper_types import ReadResourceContents
+                    import base64
+                    result=await remote.read_resource(uri)
+                    return [ReadResourceContents(content=c.text if isinstance(c,types.TextResourceContents) else base64.b64decode(c.blob),mime_type=c.mimeType) for c in result.contents]
                 async with stdio_server() as (r, w):
                     await proxy.run(r, w, proxy.create_initialization_options())
 
 
-def main():
+def _main():
     parser = argparse.ArgumentParser(description="Ego Browser research bridge")
     parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     sub.add_parser("renew-tls")
+    auto=sub.add_parser('autostart',help='macOS 登录自启与进程/HTTP 保活')
+    auto.add_argument('action',choices=['install','uninstall','status','restart'])
+    supervisor=sub.add_parser('supervise',help='前台守护服务，供 launchd 使用')
+    supervisor.add_argument('--interval',type=float,default=10)
+    supervisor.add_argument('--timeout',type=float,default=3)
+    supervisor.add_argument('--failures',type=int,default=3)
     serve = sub.add_parser("serve")
     serve.add_argument("--host")
     serve.add_argument("--port", type=int)
@@ -104,8 +120,17 @@ def main():
     call.add_argument("--file", type=Path)
     call.add_argument("--owner")
     call.add_argument("--url")
+    call.add_argument('--ca-file',type=Path)
+    call.add_argument('--token-env',default='EGO_BRIDGE_TOKEN')
     call.add_argument("--wait", action="store_true")
     call.add_argument("--wait-timeout", type=float, default=7200)
+    download=sub.add_parser('download',help='下载原始产物并校验 SHA-256，不覆盖已有文件')
+    download.add_argument('artifact_id')
+    download.add_argument('--output',type=Path,required=True)
+    download.add_argument('--owner')
+    download.add_argument('--url')
+    download.add_argument('--ca-file',type=Path)
+    download.add_argument('--token-env',default='EGO_BRIDGE_TOKEN')
     token = sub.add_parser("add-client")
     token.add_argument("owner")
     backup=sub.add_parser("backup")
@@ -120,6 +145,12 @@ def main():
     if args.command == "renew-tls":
         return initialize(runtime, renew_tls=True)
     settings = Settings.load(runtime)
+    if args.command=='autostart':
+        from .autostart import manage_autostart
+        return manage_autostart(runtime,args.action)
+    if args.command=='supervise':
+        from .supervisor import run_supervisor
+        return run_supervisor(runtime,interval=args.interval,timeout=args.timeout,failures=args.failures)
     if args.command == "add-client":
         clients = load_clients(runtime)
         if args.owner in clients:
@@ -133,8 +164,8 @@ def main():
         app = build_app(settings)
         private_json(runtime / "process.json", {"pid": os.getpid(), "port": args.port or settings.port})
         try:
-            uvicorn.run(app, host=args.host or settings.host, port=args.port or settings.port,
-                        ssl_certfile=str(runtime / "tls-cert.pem"), ssl_keyfile=str(runtime / "tls-key.pem"),
+            tls={'ssl_certfile':str(runtime/'tls-cert.pem'),'ssl_keyfile':str(runtime/'tls-key.pem')} if settings.tls_enabled else {}
+            uvicorn.run(app, host=args.host or settings.host, port=args.port or settings.port,**tls,
                         access_log=False, log_level="warning", timeout_graceful_shutdown=10, proxy_headers=False)
         finally:
             (runtime / "process.json").unlink(missing_ok=True)
@@ -154,11 +185,17 @@ def main():
         os.chmod(args.destination, 0o600)
         print(f"Backup saved: {args.destination}")
         return
-    token_value = load_clients(runtime)[args.owner or settings.default_owner]
-    ssl_context = ssl.create_default_context(cafile=str(runtime / "tls-cert.pem"))
+    from .client import connection,download_artifact
+    if args.command=='download':
+        try:
+            endpoint,client=connection(settings,args.owner,args.url,args.ca_file,args.token_env)
+            with client:data=download_artifact(client,endpoint,args.artifact_id,args.output)
+            print(json.dumps(data,ensure_ascii=False,indent=2));return
+        except (BridgeError,httpx.HTTPError,OSError) as error:
+            print(json.dumps({'ok':False,'error':error.data if isinstance(error,BridgeError) else {'error_code':'DOWNLOAD_FAILED','type':type(error).__name__}},ensure_ascii=False));sys.exit(1)
     params = json.loads(args.file.read_text() if args.file else args.json)
-    endpoint = args.url or settings.base_url
-    with httpx.Client(verify=ssl_context, headers={"Authorization": f"Bearer {token_value}"}, timeout=90) as client:
+    endpoint,client=connection(settings,args.owner,args.url,args.ca_file,args.token_env)
+    with client:
         response = client.post(f"{endpoint}/api/{args.tool}", json=params)
         response.raise_for_status()
         data = response.json()
@@ -166,12 +203,22 @@ def main():
         while args.wait and data.get("ok") and data.get("query_id") and data.get("status") not in TERMINAL:
             if time.monotonic() >= deadline:
                 print(json.dumps({"client_wait_timeout": True, "background_task_continues": True, **data}, ensure_ascii=False, indent=2))
-                return
+                sys.exit(3)
             time.sleep(2)
             data = client.post(f"{endpoint}/api/get_query_result", json={"query_id": data["query_id"], "message_id": data["message_id"]}).json()
         print(json.dumps(data, ensure_ascii=False, indent=2))
         if not data.get("ok"):
             sys.exit(1)
+        if args.wait and args.tool in {'create_query','continue_query','get_query_status','get_query_result'} and data.get('status')!='COMPLETED':
+            sys.exit(2)
+
+
+def main():
+    try:return _main()
+    except (BridgeError,httpx.HTTPError,OSError,ValueError) as error:
+        detail=error.data if isinstance(error,BridgeError) else {'error_code':'CLIENT_ERROR','type':type(error).__name__,
+            'message':'检查服务状态、HTTPS 地址、公有 CA 证书、token 配置和参数。'}
+        print(json.dumps({'ok':False,'error':detail},ensure_ascii=False));sys.exit(1)
 
 
 if __name__ == "__main__":

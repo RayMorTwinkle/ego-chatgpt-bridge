@@ -79,6 +79,7 @@ class ExportJobs:
                     lines.extend([f'## {n}. 用户',turn.get('user_text',''),f'## {n}. ChatGPT',turn.get('assistant_text','')])
                     for link in turn.get('sources',[]):lines.append(f"- {link.get('title','链接')}: {link['url']}")
                     if turn.get('state')!='complete':manifest['warnings'].append(f'第 {n} 轮尚未完成生成。')
+                    if not turn.get('render_ready',True):manifest['warnings'].append(f'第 {n} 轮的回答正文或图片尚未完成网页渲染，不能确认内容完整。')
                     for gap in turn.get('unsupported_outputs',[]):manifest['warnings'].append(f"第 {n} 轮的 {gap['kind']} 预览尚不支持导出原始文件。")
                     for index,candidate in enumerate(turn.get('artifacts',[]),1):
                         item={'turn':n,'filename':filename(candidate['name']),'status':'PENDING'}
@@ -97,7 +98,7 @@ class ExportJobs:
                         except BridgeError as error:
                             item.update(status='FAILED',error=error.data);dest.unlink(missing_ok=True)
                     self.db.execute('UPDATE debug_exports SET manifest=?,updated_at=? WHERE id=?',(json.dumps(manifest,ensure_ascii=False),now(),job))
-                partial=any(a['status']!='AVAILABLE' for a in manifest['artifacts']) or any(t.get('state')!='complete' or t.get('unsupported_outputs') for t in turns)
+                partial=any(a['status']!='AVAILABLE' for a in manifest['artifacts']) or any(t.get('state')!='complete' or t.get('unsupported_outputs') or not t.get('render_ready',True) for t in turns)
                 manifest['complete_for_loaded_content']=not partial
                 zip_path=folder/'conversation.zip';temporary=folder/'conversation.zip.part'
                 with zipfile.ZipFile(temporary,'w',compression=zipfile.ZIP_DEFLATED) as archive:

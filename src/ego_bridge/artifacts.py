@@ -80,6 +80,7 @@ class Artifacts:
         result["artifact_id"] = result.pop("id")
         result["download_url"] = self.settings.base_url + f"/artifacts/{row['id']}/content" if row["status"] == "AVAILABLE" else None
         result["requires_authentication"] = True
+        result['mcp_resource_uri']=f"ego-artifact://{row['id']}" if row['status']=='AVAILABLE' else None
         result["error"] = json.loads(row["error"]) if row["error"] else None
         return result
 

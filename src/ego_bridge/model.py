@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 import uuid
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,10 @@ TRANSITIONS = {
 
 def now() -> float:
     return time.time()
+
+
+def provisional_conversation(value: str | None) -> bool:
+    return bool(value and re.fullmatch(r'local-chatgpt(?::|%3A)[0-9a-f-]{36}',value,re.I))
 
 
 def identifier(prefix: str) -> str:
@@ -56,6 +61,10 @@ class Settings:
     project_name: str = "Ego Research Workspace"
     space_id: int = 0
     space_name: str = "ego-research-runtime"
+    force_space_takeover: bool = True
+    recreate_missing_space: bool = True
+    start_ego: bool = True
+    ego_app: str = '/Applications/ego lite.app'
     ego_cli: str = "ego-browser"
     expected_account: str = ""
     default_owner: str = "default"
@@ -63,9 +72,10 @@ class Settings:
     poll_seconds: float = 4
     soft_timeout: float = 600
     hard_timeout: float = 3600
-    browser_timeout: float = 55
+    browser_timeout: float = 90
     host: str = "127.0.0.1"
     port: int = 8766
+    tls_enabled: bool = False
     allowed_hosts: tuple[str, ...] = ("localhost", "127.0.0.1")
     allowed_client_cidrs: tuple[str, ...] = ("127.0.0.0/8",)
     artifact_max_bytes: int = 50 * 1024 * 1024
@@ -73,7 +83,8 @@ class Settings:
     @property
     def base_url(self) -> str:
         host = "127.0.0.1" if self.host in {"0.0.0.0", "::"} else self.host
-        return f"https://host.invalid:{self.port}".replace("host.invalid", f"[{host}]" if ":" in host else host)
+        scheme='https' if self.tls_enabled else 'http'
+        return f"{scheme}://host.invalid:{self.port}".replace("host.invalid", f"[{host}]" if ":" in host else host)
 
     @property
     def project_url(self) -> str:

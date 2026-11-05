@@ -21,7 +21,7 @@ async def main():
             assert result.structuredContent['ok']
             target=DEFAULT_RUNTIME/'verification/stdio-verification.json'
             target.parent.mkdir(mode=0o700,exist_ok=True)
-            target.write_text(json.dumps({'ok':True,'transport':'stdio proxy -> TLS daemon','tool_count':len(tools.tools),'diagnose':result.structuredContent},ensure_ascii=False,indent=2)+'\n')
+            target.write_text(json.dumps({'ok':True,'transport':'stdio proxy -> daemon','tool_count':len(tools.tools),'diagnose':result.structuredContent},ensure_ascii=False,indent=2)+'\n')
             print('Real stdio MCP handshake, tool schemas, and structured result verified.')
 
 

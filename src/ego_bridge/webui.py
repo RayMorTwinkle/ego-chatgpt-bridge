@@ -10,13 +10,14 @@ from starlette.responses import JSONResponse,FileResponse,RedirectResponse
 from starlette.routing import Route,Mount
 from starlette.staticfiles import StaticFiles
 
-from .auth import BrowserSessions,COOKIE_NAME,SESSION_SECONDS,env_values,token_owner
+from .auth import BrowserSessions,COOKIE_NAME,HTTP_COOKIE_NAME,SESSION_SECONDS,env_values,token_owner
 from .exports import ExportJobs
 from .model import BridgeError
 
 
 def ui_routes(service,clients):
     settings=service.settings;values=env_values(settings.runtime)
+    cookie_name=COOKIE_NAME if settings.tls_enabled else HTTP_COOKIE_NAME
     sessions=BrowserSessions(clients,values.get('WEB_SESSION_SECRET') or secrets.token_urlsafe(48),values.get('EGO_BRIDGE_OWNER') or settings.default_owner)
     jobs=ExportJobs(service)
     static=Path(__file__).with_name('web')
@@ -25,7 +26,7 @@ def ui_routes(service,clients):
     def response(data,status=200):return JSONResponse(data,status_code=status,headers={'Cache-Control':'no-store'})
 
     def owner(request,*,admin=False):
-        current=sessions.owner(request.cookies.get(COOKIE_NAME))
+        current=sessions.owner(request.cookies.get(cookie_name))
         if not current:raise BridgeError('LOGIN_REQUIRED','请使用 MCP token 登录。')
         if admin and current!=sessions.admin_owner:raise BridgeError('ADMIN_REQUIRED','此调试功能仅供主 token 的 WebUI 会话使用。')
         return current
@@ -56,10 +57,10 @@ def ui_routes(service,clients):
         data=await request.json();current=token_owner(clients,str(data.get('token','')))
         if not current:return response({'ok':False,'error':{'error_code':'INVALID_TOKEN','message':'Token 不正确。'}},401)
         result=response({'ok':True,'owner':current,'admin':current==sessions.admin_owner})
-        result.set_cookie(COOKIE_NAME,sessions.issue(current),max_age=SESSION_SECONDS,httponly=True,secure=True,samesite='strict',path='/ui')
+        result.set_cookie(cookie_name,sessions.issue(current),max_age=SESSION_SECONDS,httponly=True,secure=settings.tls_enabled,samesite='strict',path='/ui')
         return result
     async def logout(request):
-        result=response({'ok':True});result.delete_cookie(COOKIE_NAME,path='/ui',secure=True,httponly=True,samesite='strict');return result
+        result=response({'ok':True});result.delete_cookie(cookie_name,path='/ui',secure=settings.tls_enabled,httponly=True,samesite='strict');return result
     async def me(request):
         current=owner(request)
         return response({'ok':True,'owner':current,'admin':current==sessions.admin_owner,'project_name':settings.project_name,
@@ -73,13 +74,15 @@ def ui_routes(service,clients):
     async def mcp_info(request):
         current=owner(request);header='Bearer '+clients[current]
         return response({'ok':True,'mcp_url':settings.base_url+'/mcp','api_base_url':settings.base_url,
-            'authorization':header,'certificate_path':str(settings.runtime/'tls-cert.pem'),
-            'certificate_download_url':'/ui/api/certificate',
-            'certificate_sha256':hashlib.sha256((settings.runtime/'tls-cert.pem').read_bytes()).hexdigest() if (settings.runtime/'tls-cert.pem').exists() else None,
+            'authorization':header,'tls_enabled':settings.tls_enabled,
+            'certificate_path':str(settings.runtime/'tls-cert.pem') if settings.tls_enabled else None,
+            'certificate_download_url':'/ui/api/certificate' if settings.tls_enabled else None,
+            'certificate_sha256':hashlib.sha256((settings.runtime/'tls-cert.pem').read_bytes()).hexdigest() if settings.tls_enabled and (settings.runtime/'tls-cert.pem').exists() else None,
             'token_file':str(settings.runtime/'.env') if current==sessions.admin_owner else None,
             'configuration':{'mcpServers':{'ego-research':{'url':settings.base_url+'/mcp','headers':{'Authorization':header}}}}})
     async def certificate(request):
         owner(request)
+        if not settings.tls_enabled:return response({'ok':False,'error':{'error_code':'TLS_DISABLED','message':'当前使用 EasyTier 内 HTTP，无需 CA 证书。'}},404)
         return FileResponse(settings.runtime/'tls-cert.pem',filename='ego-bridge-ca.pem',media_type='application/x-pem-file',headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})
     async def artifact(request):
         current=owner(request);row,path=service.artifacts.available_path(current,request.path_params['artifact_id'])

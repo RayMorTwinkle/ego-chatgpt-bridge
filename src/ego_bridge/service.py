@@ -6,7 +6,7 @@ import json
 import re
 from urllib.parse import urlparse
 
-from .model import ACTIVE, TERMINAL, BridgeError, Settings, now
+from .model import ACTIVE, TERMINAL, BridgeError, Settings, now, provisional_conversation
 from .store import Store
 from .artifacts import Artifacts
 
@@ -50,6 +50,7 @@ class Service:
         return dict(query_id=q["id"], message_id=op["id"], request_id=op["request_id"], sequence=op["sequence"], status=op["status"],
                     conversation_id=q["conversation_id"], conversation_url=q["conversation_url"],
                     project_identifier=q["project_id"], space_identifier=q["space_id"],
+                    runtime_space_identifier=self.settings.space_id,
                     requested_model="GPT-6", requested_effort=op["payload"]["effort"],
                     observed=op["observed"], last_error=op["error"], blocked_predecessor=self.blocked_predecessor(op),
                     created_at=op["created_at"], updated_at=op["updated_at"])
@@ -124,15 +125,23 @@ class Service:
         if tool == 'collect_artifacts':
             if op['status'] not in {'COMPLETED','NEEDS_ATTENTION'} or not op['result'] or op['result'].get('completeness_signal')!='complete':
                 raise BridgeError('RESPONSE_NOT_COMPLETE','只有已确认生成完成的回答能单独收集产物。',stage='artifact')
+            if provisional_conversation(q['conversation_id']):
+                raise BridgeError('CONVERSATION_ID_PENDING','先用 recover_session 核验正式会话地址，再收集产物。',stage='artifact',action=True)
             async with self.control:
                 response=await self.adapter.call('recover',**self.browser_args(op))
                 self.store.patch(op['id'],page_label=response['page_label'])
                 matches=[t for t in response['state']['turns'] if t.get('user_id')==op['result'].get('user_message_id') and normalize(t.get('user_text',''))==normalize(self.browser_args(op)['send_text'])]
                 if len(matches)!=1 or matches[0].get('assistant_id')!=op['result'].get('assistant_message_id'):
                     raise BridgeError('ARTIFACT_ASSOCIATION_FAILED','产物消息身份与原回答不一致。',stage='artifact',action=True)
+                self.store.bind_conversation(qid,q['conversation_url'],q['conversation_id'],self.settings.space_id)
                 result=await self.package_result(self.store.operation(op['id']),matches[0],dict(op['result']))
                 self.store.transition(op['id'],'COMPLETED' if result['delivery_complete'] else op['status'],result=result,
                                       error=None if result['delivery_complete'] else BridgeError('ARTIFACT_CAPTURE_FAILED','至少一个产物尚未拿到有效字节。',stage='artifact',action=True).data)
+                if result['delivery_complete']:
+                    try:
+                        closed=await self.adapter.call('close',**self.browser_args(self.store.operation(op['id'])))
+                        if closed.get('closed'):self.store.patch(op['id'],page_label=None)
+                    except Exception:pass  # Byte delivery is durable; cleanup never resends.
             return {'ok':True,**self.view(self.store.operation(op['id'])),'delivery_complete':result['delivery_complete'],'artifacts':result['artifacts']}
         if tool == "list_messages":
             return {"ok": True, "messages": [{**self.view(self.store.operation(r[0])), "text": self.store.operation(r[0])["payload"]["text"]}
@@ -178,7 +187,7 @@ class Service:
 
     def browser_args(self, op):
         q = self.store.query(op["owner"], op["query_id"])
-        return dict(page_label=op["page_label"], conversation_url=q["conversation_url"],
+        return dict(page_label=op["page_label"] if q['space_id']==self.settings.space_id else None, conversation_url=None if provisional_conversation(q['conversation_id']) else q["conversation_url"],
                     send_text=op["payload"]["text"] + f"\n\n[ego-bridge request:{op['id']}]", effort=(op["observed"] or {}).get("effort", op["payload"]["effort"]), baseline=op["baseline"],
                     target_user_message_id=(op['result'] or {}).get('user_message_id'),target_assistant_message_id=(op['result'] or {}).get('assistant_message_id'))
 
@@ -209,6 +218,9 @@ class Service:
         try:
             self.store.transition(op_id, "PREPARING")
             args = self.browser_args(op)
+            if op['kind']=='create':
+                args['discardable_drafts']=[json.loads(r['payload'])['text']+f"\n\n[ego-bridge request:{r['id']}]" for r in self.store.db.execute(
+                    "SELECT id,payload FROM operations WHERE owner=? AND submitted_at IS NULL AND status IN ('NEEDS_ATTENTION','CANCELLED')",(op['owner'],))]
             if op["sequence"] > 1:
                 prev = self.store.db.execute("SELECT id FROM operations WHERE query_id=? AND sequence=?", (op["query_id"], op["sequence"] - 1)).fetchone()
                 previous = self.store.operation(prev[0])
@@ -216,6 +228,7 @@ class Service:
                 if not args["page_label"]:
                     args["page_label"] = previous["page_label"]
             prepared = await self.adapter.call("prepare", **args)
+            self.store.db.execute('UPDATE queries SET space_id=?,updated_at=? WHERE id=?',(self.settings.space_id,now(),op['query_id']))
             self.store.patch(op_id, page_label=prepared["page_label"], baseline=prepared["baseline"], observed=prepared["observed"])
             # Durable intent MUST commit before crossing the non-idempotent click boundary.
             self.store.transition(op_id, "SUBMITTING")
@@ -257,9 +270,16 @@ class Service:
             cid = s["identity"].get("conversation")
             if not cid:
                 return
+            if provisional_conversation(cid):
+                if now()-op['submitted_at']>op['payload']['hard_timeout']:
+                    raise BridgeError('CONVERSATION_ID_PENDING','网页仍只有临时对话地址；保留发送现场，不能重新发送。',action=True)
+                self.store.transition(op['id'],'GENERATING',error=None)
+                return
             # Normalize the verified route, ignoring the optional project-title suffix.
             url = f"https://chatgpt.com/g/{self.settings.project_id}/c/{cid}"
-            self.store.bind_conversation(op["query_id"], url, cid, self.settings.space_id)
+            # Legacy temporary routes can be promoted only here, after exact
+            # baseline, nonce-bearing user text and turn-count reconciliation.
+            self.store.bind_conversation(op["query_id"], url, cid, self.settings.space_id,promote_provisional=True)
             turn = new[0]
             state = turn["state"]
             label=s.get("model_label")
@@ -270,9 +290,9 @@ class Service:
                     raise BridgeError("MODEL_SELECTION_CHANGED", "网页当前模型／思考选择发生变化，无法继续确认所请求配置。",stage="observe",action=True)
             result = dict(content=turn["assistant_text"], sources=turn.get("sources", []),
                           user_message_id=turn.get("user_id"), assistant_message_id=turn.get("assistant_id"),
-                          history=history(turns), observed=op["observed"], completeness_signal=state,
+                          history=history(turns), observed=op["observed"], completeness_signal=state if turn.get('render_ready',True) else 'pending_render',
                           warning="模型与思考等级仅通过网页选择器核验，未验证推理后端。")
-            if state == "complete" and (turn["assistant_text"] or turn.get('artifacts') or turn.get('unsupported_outputs')) and (turn.get("regenerate") or turn.get('artifacts') or turn.get('unsupported_outputs')):
+            if state == "complete" and turn.get('render_ready',True) and (turn["assistant_text"] or turn.get('artifacts') or turn.get('unsupported_outputs')) and (turn.get("regenerate") or turn.get('artifacts') or turn.get('unsupported_outputs')):
                 result=await self.package_result(op,turn,result)
                 self.store.transition(op["id"], "COMPLETED" if result['delivery_complete'] else 'NEEDS_ATTENTION', result=result,
                                       error=None if result['delivery_complete'] else BridgeError('ARTIFACT_CAPTURE_FAILED','回答已生成，部分产物尚未得到可回传内容；无需重新发送问题。',stage='artifact',action=True).data)

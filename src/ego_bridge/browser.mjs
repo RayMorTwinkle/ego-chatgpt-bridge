@@ -26,11 +26,28 @@ async function usable(page) {
 
 async function runtimeSpace() {
   const spaces=await listTaskSpaces();
-  const entry=spaces.find(s=>s.id===input.space_id);
-  if(!entry) fail('SPACE_MISSING','专用空间不存在；不能通过创建空空间伪装恢复。');
+  let entry=spaces.find(s=>s.id===input.space_id);
+  if(!entry){
+    const named=spaces.filter(s=>s.name===input.space_name);
+    if(named.length>1)fail('SPACE_AMBIGUOUS','专用空间名称不唯一，不能猜测目标空间。');
+    entry=named[0];
+  }
+  if(!entry){
+    if(!input.recreate_missing_space)fail('SPACE_MISSING','专用空间不存在，自动重建未开启。');
+    const created=await taskSpace(input.space_name);
+    receipt.runtime_space={previous_id:input.space_id,space_id:created.spaceId,name:created.name,recreated:true,history_restored:false};
+    return created;
+  }
   if(entry.name!==input.space_name) fail('SPACE_IDENTITY_MISMATCH','空间名称和持久化标识不一致。');
-  if(entry.ownership==='user') fail('SPACE_USER_CONTROL','空间当前由用户控制；服务不能自动夺回。');
-  return await taskSpace(entry.id);
+  let task;
+  if(input.force_space_takeover){
+    task=entry.ownership==='user'||entry.ownership==='inactive'?await claimTaskSpace(entry.id):await takeOverTaskSpace(entry.id);
+  }else{
+    if(entry.ownership==='user')fail('SPACE_USER_CONTROL','专用空间当前由用户控制。');
+    task=await taskSpace(entry.id);
+  }
+  receipt.runtime_space={previous_id:input.space_id,space_id:task.spaceId,name:task.name,recreated:false,exclusive:!!input.force_space_takeover};
+  return task;
 }
 
 async function state(page) {
@@ -48,6 +65,7 @@ async function state(page) {
       return {state:turn.getAttribute('data-talvt-turn-state'),user_id:user?.getAttribute('data-chatgpt-search-message-ids')??null,
         user_text:user?.innerText??'',assistant_id:selected?.getAttribute('data-chatgpt-selection-message-id')??null,
         assistant_text:response?.innerText??'',sources:response?Array.from(response.querySelectorAll('a[href]')).filter(visible).map(a=>({title:a.innerText,url:a.href})):[],
+        render_ready:!!(response?.innerText.trim()||images.some(i=>i.complete&&i.naturalWidth>0)||unsupported_outputs.length),
         artifacts,unsupported_outputs,regenerate:!!turn.querySelector('button[aria-label="重新產生回覆"]')};
     });
     const editor=document.querySelector('form [contenteditable="true"]');
@@ -73,7 +91,8 @@ function check(s, conversation) {
 
 async function choosePage(task, create=false) {
   const tabs=await task.tabs();
-  let found=input.page_label && tabs.find(t=>t.label===input.page_label);
+  const sameSpace=!receipt.runtime_space?.recreated&&receipt.runtime_space?.space_id===input.space_id;
+  let found=sameSpace&&input.page_label && tabs.find(t=>t.label===input.page_label);
   if(found && input.conversation_url && identity(found.url).conversation!==identity(input.conversation_url).conversation)
     fail('CONVERSATION_MISMATCH','已绑定标签页被人工切换；停止操作。');
   if(!found && input.conversation_url) found=tabs.find(t=>identity(t.url).conversation===identity(input.conversation_url).conversation);
@@ -84,7 +103,7 @@ async function choosePage(task, create=false) {
     return page;
   }
   if(!create) fail('TAB_MISSING','找不到关联标签页，不能猜测另一条会话。');
-  const page=await task.newPage();
+  const page=await freshPage(task);
   receipt.page_label=page.label;
   try {await page.goto(input.conversation_url??input.project_url,{timeout:10000});}
   catch(error) {
@@ -95,6 +114,12 @@ async function choosePage(task, create=false) {
   }
   await usable(page);
   return page;
+}
+
+async function freshPage(task){
+  const tabs=await task.tabs();
+  const blank=tabs.length===1&&tabs[0].label==='p1'&&['about:blank','chrome://newtab/'].includes(tabs[0].url)&&tabs[0].openedBy==='agent';
+  return blank?task.page('p1'):await task.newPage();
 }
 
 async function account(page) {
@@ -108,7 +133,7 @@ async function account(page) {
 
 async function modelInfo(page) {
   await page.keyboard.press('Escape');
-  await page.waitForSelector(MODEL_BUTTON,{state:'visible',timeout:10000});
+  await page.waitForSelector(MODEL_BUTTON,{state:'visible',timeout:20000});
   await page.click(MODEL_BUTTON);
   return await page.evaluate(()=>({
     models:Array.from(document.querySelectorAll('[role="menuitemradio"]')).map(e=>({label:e.textContent?.trim(),checked:e.getAttribute('aria-checked')==='true'})),
@@ -248,7 +273,7 @@ async function main() {
       page=task.page(input.page_label);
       if(identity(await page.url()).conversation!==cid)fail('CONVERSATION_MISMATCH','调试标签页已切换，停止导出。','debug');
     }else{
-      page=await task.newPage();receipt.page_label=page.label;
+      page=await freshPage(task);receipt.page_label=page.label;
       try{await page.goto(requested.origin+requested.pathname,{timeout:15000});}catch(error){if(identity(await page.url()).conversation!==cid)throw error;}
     }
     receipt.page_label=page.label;
@@ -261,7 +286,18 @@ async function main() {
     if(input.action==='debug_capture')return {...receipt,...await capture(page)};
     await account(page);
     await page.snapshot({scope:'full_page'});
-    const s=await state(page);
+    // Historical turn markers can say complete before the reply body and image
+    // hydrate. Never equate the turn count with readable historical content.
+    let s,previous=null,stable=0;const deadline=Date.now()+20000;
+    while(Date.now()<deadline){
+      s=await state(page);
+      const ready=s.turns.length>0&&s.turns.every(t=>t.state!=='complete'||t.render_ready);
+      const signature=JSON.stringify(s.turns);
+      stable=ready&&signature===previous?stable+1:0;
+      if(stable>=2)break;
+      previous=signature;await new Promise(r=>setTimeout(r,200));
+    }
+    if(s.turns.some(t=>t.state==='complete'&&!t.render_ready))receipt.history_render_incomplete=true;
     if(s.login)fail('LOGIN_REQUIRED','请先在专用空间登录。','debug');
     return {...receipt,state:s,read_only:true,history_pagination_verified:false};
   }
@@ -303,7 +339,11 @@ async function main() {
   if(input.action==='prepare') {
     if(!input.conversation_url&&(s.identity.conversation||s.turns.length)) fail('CONVERSATION_MISMATCH','新查询只能从空的项目输入页发起，不能追加到未绑定的会话。','prepare');
     if(s.turns.some(t=>t.state!=='complete')) fail('CONVERSATION_BUSY','页面中存在尚未完成的消息。','prepare');
-    if(norm(s.draft) && norm(s.draft)!==norm(input.send_text)) fail('DRAFT_PRESENT','编辑器存在非空草稿；不覆盖用户输入。','prepare');
+    if(norm(s.draft) && norm(s.draft)!==norm(input.send_text)) {
+      if(!input.conversation_url&&(input.discardable_drafts??[]).some(d=>norm(d)===norm(s.draft))){
+        await page.fill(EDITOR,'');receipt.discarded_unsent_bridge_draft=true;s=await state(page);
+      }else fail('DRAFT_PRESENT','编辑器存在非空草稿；不覆盖用户输入。','prepare');
+    }
     if(input.expected_history && JSON.stringify(s.turns.map(t=>({user_id:t.user_id,user_text:norm(t.user_text),assistant_id:t.assistant_id,assistant_text:norm(t.assistant_text)})))!==JSON.stringify(input.expected_history))
       fail('HISTORY_CHANGED','会话历史与上次完成记录不一致，可能被人工修改。','prepare');
     const accountState=await account(page);

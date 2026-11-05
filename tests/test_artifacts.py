@@ -96,6 +96,17 @@ async def test_authenticated_http_bytes_and_native_mcp_image(tmp_path):
                     assert not r.isError
                     image=next(c for c in r.content if c.type=='image')
                     assert base64.b64decode(image.data)==PNG
+                    linked=await m.call_tool('read_artifact',{'artifact_id':row['artifact_id'],'inline_image':False})
+                    link=next(c for c in linked.content if c.type=='resource_link')
+                    resource=await m.read_resource(link.uri)
+                    assert base64.b64decode(resource.contents[0].blob)==PNG
+        # A prior successful read must not cache one owner's bytes for a different owner.
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),headers={'Authorization':'Bearer '+'b'*40}) as http:
+            async with streamable_http_client('https://localhost/mcp',http_client=http) as (rd,wr,_):
+                async with ClientSession(rd,wr) as m:
+                    await m.initialize()
+                    from mcp.shared.exceptions import McpError
+                    with pytest.raises(McpError):await m.read_resource(link.uri)
 
 
 def test_filename_never_supplies_a_storage_path():

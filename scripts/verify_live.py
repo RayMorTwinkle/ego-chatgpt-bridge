@@ -19,11 +19,12 @@ RUNTIME=DEFAULT_RUNTIME
 
 async def main():
     token=load_clients(RUNTIME)[Settings.load(RUNTIME).default_owner]
-    context=ssl.create_default_context(cafile=str(RUNTIME/'tls-cert.pem'))
+    settings=Settings.load(RUNTIME)
+    context=ssl.create_default_context(cafile=str(RUNTIME/'tls-cert.pem')) if settings.tls_enabled else True
     config=json.loads((RUNTIME/'config.json').read_text())
     hosts=config['allowed_hosts']
     lan=next((h for h in hosts if h.startswith(('192.168.','10.','172.'))),'127.0.0.1')
-    url=f'https://{lan}:8766'
+    url=settings.base_url
     report={'started_at':time.time(),'endpoint':url,'mode':'real_browser_and_network','checks':[],'tasks':[]}
     target=RUNTIME/'verification/live-integration.json'
     target.parent.mkdir(mode=0o700,exist_ok=True)
@@ -39,7 +40,7 @@ async def main():
             return value
         async with httpx.AsyncClient(verify=context) as anonymous:
             assert (await anonymous.post(url+'/api/list_queries',json={})).status_code==401
-        report['checks'].append('TLS verified connection to LAN interface; anonymous access rejected')
+        report['checks'].append('Configured LAN transport connected; anonymous access rejected')
         async with streamable_http_client(url+'/mcp',http_client=http) as (read,write,_):
             async with ClientSession(read,write) as session:
                 await session.initialize()

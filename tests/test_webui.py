@@ -37,7 +37,7 @@ def test_cookie_is_signed_expires_and_token_rotation_revokes_it():
 
 
 async def test_web_login_cookie_mcp_info_csrf_and_logout(tmp_path):
-    app=build_app(Settings(tmp_path,default_owner='alice'),adapter=ExportBrowser(),clients={'alice':'a'*40})
+    app=build_app(Settings(tmp_path,default_owner='alice',tls_enabled=True),adapter=ExportBrowser(),clients={'alice':'a'*40})
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='https://localhost') as c:
             assert (await c.get('/ui/')).status_code==200
@@ -89,3 +89,40 @@ async def test_web_login_page_is_also_easytier_restricted(tmp_path):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app,client=('10.241.1.2',1234)),base_url='https://localhost') as c:
             assert (await c.get('/ui/')).status_code==403
             assert (await c.post('/ui/api/login',json={'token':'a'*40})).status_code==403
+
+
+async def test_export_does_not_claim_complete_for_unhydrated_historical_reply(tmp_path):
+    browser=ExportBrowser();original=browser.call
+    async def read(action,**kw):
+        result=await original(action,**kw)
+        if action=='debug_observe':result['state']['turns'][0]['render_ready']=False
+        return result
+    browser.call=read;app=build_app(Settings(tmp_path,default_owner='alice'),adapter=browser,clients={'alice':'a'*40})
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='https://localhost') as c:
+            await c.post('/ui/api/login',json={'token':'a'*40})
+            job=(await c.post('/ui/api/exports',json={'conversation_url':'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee','request_id':'render'})).json()['export']['id']
+            for _ in range(100):
+                item=(await c.get('/ui/api/exports/'+job)).json()['export']
+                if item['status'] not in {'QUEUED','RUNNING'}:break
+                await asyncio.sleep(.01)
+            assert item['status']=='PARTIAL' and not item['manifest']['complete_for_loaded_content']
+            assert any('渲染' in text for text in item['manifest']['warnings'])
+
+
+async def test_http_needs_no_ca_and_uses_distinct_one_year_cookie(tmp_path):
+    from ego_bridge.auth import HTTP_COOKIE_NAME
+    (tmp_path/'.env').write_text("WEB_SESSION_SECRET='test-secret'\n")
+    app=build_app(Settings(tmp_path,default_owner='alice'),adapter=ExportBrowser(),clients={'alice':'a'*40})
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://localhost') as c:
+            c.cookies.set(COOKIE_NAME,BrowserSessions({'alice':'a'*40},'test-secret','alice').issue('alice'))
+            assert (await c.get('/ui/api/me')).status_code==401
+            login=await c.post('/ui/api/login',json={'token':'a'*40});cookie=login.headers['set-cookie']
+            assert HTTP_COOKIE_NAME in cookie and 'HttpOnly' in cookie and 'Max-Age=31536000' in cookie
+            assert '; Secure' not in cookie
+            assert (await c.get('/ui/api/me')).json()['owner']=='alice'
+            info=(await c.post('/ui/api/mcp-info',json={})).json()
+            assert info['mcp_url'].startswith('http://') and not info['tls_enabled']
+            assert info['certificate_path'] is None and info['certificate_download_url'] is None
+            assert (await c.get('/ui/api/certificate')).status_code==404

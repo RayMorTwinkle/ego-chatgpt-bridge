@@ -18,7 +18,7 @@ RUNTIME=DEFAULT_RUNTIME
 
 async def main():
     token=load_clients(RUNTIME)[Settings.load(RUNTIME).default_owner]
-    context=ssl.create_default_context(cafile=str(RUNTIME/'tls-cert.pem'))
+    context=ssl.create_default_context(cafile=str(RUNTIME/'tls-cert.pem')) if Settings.load(RUNTIME).tls_enabled else True
     report={'test':'real_service_restart_after_submission','started_at':time.time()}
     target=RUNTIME/'verification/restart-integration.json'
     target.parent.mkdir(mode=0o700,exist_ok=True)

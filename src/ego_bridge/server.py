@@ -181,10 +181,15 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
             if inline_image and row['mime_type'] in {'image/png','image/jpeg','image/gif','image/webp'} and row['size_bytes']<=4*1024*1024:
                 contents.append(types.ImageContent(type='image',data=base64.b64encode(path.read_bytes()).decode(),mimeType=row['mime_type']))
             else:
-                contents.append(types.ResourceLink(type='resource_link',name=row['filename'],uri=meta['download_url'],mimeType=row['mime_type'],size=row['size_bytes']))
+                contents.append(types.ResourceLink(type='resource_link',name=row['filename'],uri=meta['mcp_resource_uri'],mimeType=row['mime_type'],size=row['size_bytes']))
             return types.CallToolResult(content=contents)
         except BridgeError as error:
             return types.CallToolResult(isError=True,content=[types.TextContent(type='text',text=json.dumps(error.data,ensure_ascii=False))])
+
+    @mcp.resource('ego-artifact://{artifact_id}',mime_type='application/octet-stream',description='原始产物字节；身份沿用当前 MCP 连接，实际文件类型见产物元数据。')
+    async def artifact_bytes(artifact_id: str,ctx: Context) -> bytes:
+        row,path=service.artifacts.available_path(ctx.request_context.request.state.owner,artifact_id)
+        return path.read_bytes()
 
     @mcp.tool()
     async def delete_query(query_id: str, ctx: Context) -> dict[str, Any]:

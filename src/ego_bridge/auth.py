@@ -17,6 +17,7 @@ from .model import BridgeError
 
 SESSION_SECONDS = 365 * 24 * 60 * 60
 COOKIE_NAME = "ego_bridge_session"
+HTTP_COOKIE_NAME = "ego_bridge_session_http"
 
 
 def env_values(runtime: Path) -> dict:

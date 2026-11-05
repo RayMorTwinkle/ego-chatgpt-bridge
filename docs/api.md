@@ -1,6 +1,6 @@
 # 接口与产物交付
 
-MCP `/mcp`、HTTP `POST /api/<tool>`、CLI 和 stdio 共用同一 Service。网络入口使用 TLS、Bearer token、Host 白名单和来源 CIDR。WebUI 使用同一个身份 token 登录后签发的一年 cookie；普通 MCP／HTTP API 不接受 WebUI cookie 替代 Bearer。
+MCP `/mcp`、HTTP `POST /api/<tool>`、CLI 和 stdio 共用同一 Service。网络入口默认使用 EasyTier 内 HTTP、Bearer token、Host 白名单和来源 CIDR；TLS 可选。WebUI 使用同一个身份 token 登录后签发的一年 cookie；普通 MCP／HTTP API 不接受 WebUI cookie 替代 Bearer。
 
 ## 17 个 MCP 工具
 
@@ -46,7 +46,7 @@ Query ID 对应一个 Conversation；Message ID 对应一次输入／响应。�
     "artifacts": [{
       "artifact_id":"art_...","filename":"image-1.png","status":"AVAILABLE",
       "mime_type":"image/png","kind":"image","size_bytes":12345,"sha256":"...",
-      "download_url":"https://<配置地址>:8766/artifacts/art_.../content",
+      "download_url":"http://<配置地址>:8766/artifacts/art_.../content",
       "requires_authentication":true
     }],
     "unsupported_outputs":[],
@@ -56,19 +56,21 @@ Query ID 对应一个 Conversation；Message ID 对应一次输入／响应。�
 }
 ```
 
-`generation_complete` 只描述网页生成信号；`delivery_complete` 描述已发现的产物是否就绪；两者满足且操作完成后 complete 才为 true。部分失败保留文字和错误，不用空文件制造成功。默认读取最新消息，历史结果传 message_id。
+`generation_complete` 描述已确认渲染的网页生成信号；`delivery_complete` 描述已发现的产物是否就绪；两者满足且操作完成后 complete 才为 true。部分失败保留文字和错误，不用空文件制造成功。默认读取最新消息，历史结果传 message_id。
 
 产物状态：PENDING → DOWNLOADING → AVAILABLE／FAILED。记录先落库，临时字节验证后原子重命名并 fsync，再发布元数据。中断后的已完成文件可对账，不再次提问。默认单文件最多 50 MiB，超限、空文件、签名或容器不匹配均失败。
 
-常见图片不超过 4 MiB 时，`read_artifact` 返回 MCP ImageContent；`inline_image=false` 强制使用 ResourceLink。HTTP 下载支持 GET、HEAD 和 Range；需同一调用方的 Bearer token，不将 token 放入 URL。signed source URL、内部磁盘路径和浏览器认证头不回传。
+常见图片不超过 4 MiB 时，`read_artifact` 返回 MCP ImageContent；`inline_image=false` 强制使用 `ego-artifact://...` ResourceLink。MCP `resources/read` 沿用当前连接认证返回原文件字节，stdio 代理也转发资源模板和读取；资源协议 MIME 为 application/octet-stream，实际 MIME 见产物元数据。HTTP 下载支持 GET、HEAD 和 Range；需同一调用方的 Bearer token，不将 token 放入 URL。signed source URL、内部磁盘路径和浏览器认证头不回传。
 
 普通外链保持为链接，不自动抓取任意地址。可见音视频、Canvas、iframe 或大 SVG 等尚未实现的原始导出会列入 unsupported_outputs，提供需 ChatGPT 登录的查看位置，交付完整性为 false。
 
 ## WebUI 边界
 
-`/ui/api/login` 接受 MCP token，签发 HttpOnly、Secure、SameSite=Strict cookie，Max-Age=31536000。cookie 绑定 token 指纹，修改 token 并重启会使旧会话失效。UI 的写操作校验同源 Origin，token 不存 localStorage。
+`/ui/api/login` 接受 MCP token，签发 HttpOnly、SameSite=Strict cookie（HTTPS 启用时额外设置 Secure），Max-Age=31536000。cookie 绑定 token 指纹，修改 token 并重启会使旧会话失效。UI 的写操作校验同源 Origin，token 不存 localStorage。
 
-`POST /ui/api/mcp-info` 仅在已登录 UI 中返回当前身份的接入配置；用户可以显式复制自己的 token。
+`POST /ui/api/mcp-info` 仅在已登录 UI 中返回当前身份的接入配置；用户可以显式复制自己的 token。默认 HTTP 不返回证书信息或显示 CA 下载入口；只有主动开启 HTTPS 时，`GET /ui/api/certificate` 才提供可选的公有证书。
+
+CLI `download artifact_id --output path` 使用同一认证，验证大小及 SHA-256 后原子发布文件，不覆盖已有目标。普通 call 和 download 可用 EGO_BRIDGE_URL／EGO_BRIDGE_TOKEN 环境变量（HTTPS 才需额外的 CA 配置）作为独立 LAN 客户端；不需要服务端数据库。
 
 主 token 的 UI 会话另有 `/ui/api/exports`，输入实际 ChatGPT 对话 URL，异步只读打包为 ZIP。它不受普通查询的固定專案限制，**没有对应 MCP 工具、普通 `/api/` 工具或 CLI 导出命令**。仅持有 Bearer 而没有 UI 登录 cookie 不能直接调用该入口。额外 Agent 身份不能执行账户级调试导出。
 

@@ -299,6 +299,38 @@ async def test_preparation_failure_safe_retry(rig):
     assert len(fake.sent)==1
 
 
+async def test_temporary_route_waits_for_server_identity_and_legacy_route_can_recover(rig):
+    s,db,fake=rig
+    task=await create(s);await execute(s,db,task)
+    original=fake.call;cid='local-chatgpt%3Aaaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    async def observed(action,**kw):
+        result=await original(action,**kw)
+        if action in {'observe','recover'}:result['state']['identity']['conversation']=cid
+        return result
+    fake.call=observed
+    await s.observe(db.operation(task['message_id']))
+    assert db.query('alice',task['query_id'])['conversation_id'] is None
+    assert db.operation(task['message_id'])['status']=='GENERATING' and len(fake.sent)==1
+    # A previous version could persist the temporary route. Promote it only
+    # after the exact nonce-bearing turn and unchanged history are reconciled.
+    db.bind_conversation(task['query_id'],'https://chatgpt.com/g/project/c/'+cid,cid)
+    cid='aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb'
+    result=await s.dispatch('alice','recover_session',{'query_id':task['query_id']})
+    assert result['status']=='COMPLETED' and result['conversation_id']==cid and len(fake.sent)==1
+    with pytest.raises(BridgeError):db.bind_conversation(task['query_id'],'https://chatgpt.com/c/different','different',promote_provisional=True)
+
+
+async def test_completed_marker_does_not_complete_unhydrated_reply(rig):
+    s,db,fake=rig;task=await create(s);await execute(s,db,task)
+    fake.pages['p1'][0]['render_ready']=False
+    await s.observe(db.operation(task['message_id']))
+    result=await s.dispatch('alice','get_query_result',{'query_id':task['query_id']})
+    assert not result['generation_complete'] and result['status']=='GENERATING'
+    fake.pages['p1'][0]['render_ready']=True
+    await s.observe(db.operation(task['message_id']))
+    assert db.operation(task['message_id'])['status']=='COMPLETED' and len(fake.sent)==1
+
+
 def test_single_writer_and_persistent_reopen(tmp_path):
     a=Store(tmp_path)
     with pytest.raises(BridgeError,match='另一个服务进程'):
