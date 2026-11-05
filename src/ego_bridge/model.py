@@ -49,6 +49,8 @@ class BridgeError(Exception):
     def suggestion(code: str) -> str:
         if code in {"LOGIN_REQUIRED", "VERIFICATION_REQUIRED"}:
             return "在 Ego 专用空间人工完成登录或验证，再调用 recover_session。"
+        if code in {'MESSAGE_ASSOCIATION_FAILED','HISTORY_CHANGED'}:
+            return '用原 Query ID 调用 recover_session 或 diagnose；不要重发。浏览器空间属于服务端，客户端本机不一定能访问；持续失败时把诊断证据交给维护者。'
         if code in {"SEND_OUTCOME_UNKNOWN", "BROWSER_TIMEOUT"}:
             return "保留现场，核对指定对话与消息；调用 recover_session 对账，不要重发。"
         return "查看 diagnose 返回的阶段和状态；修复后使用对应恢复操作。"

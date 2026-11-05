@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import hashlib
 import re
 from urllib.parse import urlparse
 
@@ -45,6 +46,25 @@ class Service:
         if hasattr(self.adapter, "close"):
             self.adapter.close()
 
+    def execution_context(self):
+        return {'browser_location':'bridge_server','space_identifier_scope':'server_browser_instance',
+            'client_local_browser_cli_required':False,'management_ui_url':self.settings.base_url+'/ui/',
+            'note':'浏览器由桥接服务器托管。空间编号只在服务端 Ego 实例有效，不能用客户端本机 ego-browser 据此查找。'}
+
+    def next_action(self,op):
+        args={'query_id':op['query_id'],'message_id':op['id']}
+        state=op['status'];error=op.get('error') or {}
+        if state in {'QUEUED','PREPARING','SUBMITTING','WAITING_FOR_RESPONSE','GENERATING'}:
+            return {'tool':'get_query_result','arguments':args,'wait_seconds':5,'do_not_resend':True,
+                'note':'回答可能分段增长；complete=false 时继续等待，已有 result.content 可读但不是最终结果。'}
+        if state=='OUTCOME_UNKNOWN' or state=='NEEDS_ATTENTION' and op['submitted_at'] is not None:
+            tool='collect_artifacts' if error.get('error_code')=='ARTIFACT_CAPTURE_FAILED' else 'recover_session'
+            return {'tool':tool,'arguments':args,'do_not_resend':True,
+                'note':'只读对账，不会重发。若仍失败，调用 diagnose 并把证据交给桥接服务维护者；不要在客户端本机寻找服务端空间。'}
+        if state=='NEEDS_ATTENTION' and op['submitted_at'] is None and error.get('safe_to_retry'):
+            return {'tool':'retry_query','arguments':args,'requires_operator_fix':True,'note':'先按错误修复发送前问题，再重试原操作。'}
+        return None
+
     def view(self, op: dict) -> dict:
         q = self.store.query(op["owner"], op["query_id"])
         return dict(query_id=q["id"], message_id=op["id"], request_id=op["request_id"], sequence=op["sequence"], status=op["status"],
@@ -53,14 +73,23 @@ class Service:
                     runtime_space_identifier=self.settings.space_id,
                     requested_model="GPT-6", requested_effort=op["payload"]["effort"],
                     observed=op["observed"], last_error=op["error"], blocked_predecessor=self.blocked_predecessor(op),
-                    created_at=op["created_at"], updated_at=op["updated_at"])
+                    created_at=op["created_at"], updated_at=op["updated_at"],
+                    execution_context=self.execution_context(),next_action=self.next_action(op),
+                    progress={'answer_characters':len((op.get('result') or {}).get('content','')),
+                        'source_count':len((op.get('result') or {}).get('sources',[])),
+                        'last_observed_at':(op.get('result') or {}).get('observed_at'),'browser_turn_state':(op.get('result') or {}).get('browser_turn_state'),'partial':op['status'] in {'WAITING_FOR_RESPONSE','GENERATING'}})
 
     async def dispatch(self, owner: str, tool: str, args: dict) -> dict:
         try:
             return await self._dispatch(owner, tool, args)
         except BridgeError as e:
             e.data.update(query_id=args.get("query_id"), request_id=args.get("request_id"))
-            return {"ok": False, "error": e.data}
+            result={"ok": False, "error": e.data,"execution_context":self.execution_context()}
+            if tool=='health_check':
+                e.data['recovery_suggestion']='health_check是可选浏览器诊断。可用diagnose检查worker，已有请求按原Query ID等待/恢复；发送前会独立核验，不要据此在客户端重建空间或重发。'
+                result.update(health_check_is_advisory=True,service_available=True,
+                    guidance='健康检查是可选诊断，不是请求准入门槛；发送前会独立核验。不要高频重试健康检查，也不要重发已有请求。')
+            return result
         except (TypeError, ValueError, KeyError) as e:
             return {"ok": False, "error": BridgeError("INVALID_ARGUMENT", "参数格式不正确。", context={"type": type(e).__name__}).data}
 
@@ -97,10 +126,10 @@ class Service:
         if tool == "health_check":
             async with self.control:
                 health = await self.adapter.call("health")
-            return {"ok": True, "runtime": health, "active_operations": len(self.store.active()), "worker_error": self.last_worker_error}
+            return {"ok": True, "runtime": health, "active_operations": len(self.store.active()), "worker_error": self.last_worker_error,"health_check_is_advisory":True,"execution_context":self.execution_context()}
         if tool == "diagnose" and not args.get("query_id"):
             return {"ok": True, "worker_running": bool(self.worker and not self.worker.done()), "last_worker_error": self.last_worker_error,
-                    "active_count": len(self.store.active()), "retention": {"policy":self.retention.policy(),"last_run":self.retention.last} if hasattr(self,"retention") else None, "model_policy": "GPT-6 / extra_high, high only", "max_active": self.settings.max_active}
+                    "active_count": len(self.store.active()), "retention": {"policy":self.retention.policy(),"last_run":self.retention.last} if hasattr(self,"retention") else None, "model_policy": "GPT-6 / extra_high, high only", "max_active": self.settings.max_active,"execution_context":self.execution_context()}
         qid = args.get("query_id")
         q = self.store.query(owner, qid)
         op = self.store.operation(args["message_id"]) if args.get("message_id") else self.store.latest(owner, qid)
@@ -122,7 +151,7 @@ class Service:
                 result["delivery_complete"]=delivery_complete
                 if any(a["status"]=="EXPIRED" for a in result.get("artifacts",[])):result["delivery_phase"]="EXPIRED"
             return {"ok": True, **self.view(op), "generation_complete":generation_complete,"delivery_complete":delivery_complete, "delivery_expired":any(a["status"]=="EXPIRED" for a in result.get("artifacts",[])),
-                    "complete": op["status"] == "COMPLETED" and delivery_complete, "result": result or None}
+                    "complete": op["status"] == "COMPLETED" and delivery_complete, "result_is_partial":bool(op["result"] and not generation_complete), "result": result or None}
         if tool == 'list_artifacts':
             return {'ok':True,'query_id':qid,'message_id':op['id'],'artifacts':self.artifacts.list(owner,op['id'])}
         if tool == 'collect_artifacts':
@@ -260,16 +289,42 @@ class Service:
             self.store.patch(op["id"], page_label=response["page_label"])
             s, baseline = response["state"], op["baseline"]
             turns, old = s["turns"], baseline["turns"]
-            if history(turns[:len(old)]) != history(old):
-                raise BridgeError("HISTORY_CHANGED", "已存在的消息被修改，停止自动关联。", action=True)
-            new = turns[len(old):]
             expected = normalize(self.browser_args(op)["send_text"])
+            new = turns[len(old):]
+            def summary(reason):
+                first=new[0] if new else {}
+                actual=normalize(first.get('user_text',''))
+                marker=f"[ego-bridge request:{op['id']}]"
+                cid=s.get('identity',{}).get('conversation')
+                observed_url=f'https://chatgpt.com/g/{self.settings.project_id}/c/{cid}' if cid and not provisional_conversation(cid) else None
+                difference=next((i for i,(a,b) in enumerate(zip(expected,actual)) if a!=b),min(len(expected),len(actual)))
+                return {'reason':reason,'expected_baseline_turn_count':len(old),'observed_total_turn_count':len(turns),
+                    'expected_new_turn_count':1,'observed_new_turn_count':len(new),
+                    'expected_user_text_characters':len(expected),'observed_user_text_characters':len(actual),
+                    'expected_user_text_sha256':hashlib.sha256(expected.encode()).hexdigest(),
+                    'observed_user_text_sha256':hashlib.sha256(actual.encode()).hexdigest(),
+                    'first_difference_offset':difference,'request_marker_present':marker in first.get('user_text',''),
+                    'observed_user_message_id':first.get('user_id'),'observed_assistant_message_id':first.get('assistant_id'),
+                    'observed_turn_state':first.get('state'),'reader':first.get('reader_diagnostics'),
+                    'observed_conversation_url':observed_url,'conversation_url_verified':False,
+                    'page_label':response.get('page_label'),'runtime_space_identifier':self.settings.space_id,
+                    'browser_location':'bridge_server','resend_allowed':False}
+            if history(turns[:len(old)]) != history(old):
+                raise BridgeError('HISTORY_CHANGED','已存在的消息被修改，停止自动关联。',stage='observe',action=True,context=summary('baseline_history_mismatch'))
             if not new:
-                if now() - op["submitted_at"] > 30 or recover:
-                    raise BridgeError("SEND_OUTCOME_UNKNOWN", "页面未提供新消息证据；不能判断是否发送。", action=True)
+                if now() - op['submitted_at'] > 30 or recover:
+                    raise BridgeError('SEND_OUTCOME_UNKNOWN','页面未提供新消息证据；不能判断是否发送。',stage='observe',action=True,context=summary('no_new_turn'))
                 return
-            if len(new) != 1 or normalize(new[0]["user_text"]) != expected:
-                raise BridgeError("MESSAGE_ASSOCIATION_FAILED", "发现额外消息或不匹配内容，停止关联结果。", action=True)
+            if len(new)==1:
+                actual=normalize(new[0].get('user_text',''))
+                hydrating=not new[0].get('user_id') or not actual or (expected.startswith(actual) and actual!=expected)
+                if hydrating and now()-op['submitted_at']<=30:
+                    target='GENERATING' if op['status']=='GENERATING' else 'WAITING_FOR_RESPONSE'
+                    self.store.transition(op['id'],target,error=None)
+                    return
+            if len(new)!=1 or normalize(new[0]['user_text'])!=expected:
+                reason='new_turn_count_mismatch' if len(new)!=1 else 'user_text_mismatch'
+                raise BridgeError('MESSAGE_ASSOCIATION_FAILED','网页消息未通过唯一请求关联；未取用其他消息，也不会重发。请查看 diagnostic_context 的计数、哈希和读回状态。',stage='observe',action=True,context=summary(reason))
             cid = s["identity"].get("conversation")
             if not cid:
                 return
@@ -291,11 +346,11 @@ class Service:
                 effort_ok=bool(re.search(r"Extra High|極高|极高",label)) if effort=='extra_high' else bool(re.search(r"(^|\s)High($|\s)|推理強度\s*高$",label))
                 if not effort_ok or re.search(r"5\.6|\bPro\b",label):
                     raise BridgeError("MODEL_SELECTION_CHANGED", "网页当前模型／思考选择发生变化，无法继续确认所请求配置。",stage="observe",action=True)
-            result = dict(content=turn["assistant_text"], sources=turn.get("sources", []),
+            result = dict(content=turn["assistant_text"], sources=turn.get("sources", []),observed_at=now(),browser_turn_state=state,external_images=turn.get("external_images",[]),
                           user_message_id=turn.get("user_id"), assistant_message_id=turn.get("assistant_id"),
                           history=history(turns), observed=op["observed"], completeness_signal=state if turn.get('render_ready',True) else 'pending_render',
                           warning="模型与思考等级仅通过网页选择器核验，未验证推理后端。")
-            if state == "complete" and turn.get('render_ready',True) and (turn["assistant_text"] or turn.get('artifacts') or turn.get('unsupported_outputs')) and (turn.get("regenerate") or turn.get('artifacts') or turn.get('unsupported_outputs')):
+            if state == "complete" and turn.get('render_ready',True) and (turn["assistant_text"] or turn.get('artifacts') or turn.get('external_images') or turn.get('unsupported_outputs')) and (turn.get("regenerate") or turn.get('artifacts') or turn.get('external_images') or turn.get('unsupported_outputs')):
                 result=await self.package_result(op,turn,result)
                 self.store.transition(op["id"], "COMPLETED" if result['delivery_complete'] else 'NEEDS_ATTENTION', result=result,
                                       error=None if result['delivery_complete'] else BridgeError('ARTIFACT_CAPTURE_FAILED','回答已生成，部分产物尚未得到可回传内容；无需重新发送问题。',stage='artifact',action=True).data)
@@ -328,6 +383,9 @@ class Service:
     async def package_result(self,op,turn,result):
         result.update(delivery_complete=False,delivery_phase='COLLECTING_ARTIFACTS')
         self.store.transition(op['id'],op['status'],result=result,error=op['error'])
+        result['external_images']=turn.get('external_images',[])
+        changed=self.artifacts.reconcile_external_references(op,result['external_images'])
+        if changed:result['delivery_notes']=[f'{changed} 个历史外部图片条目已更正为引用内容；未缓存第三方图片，不伪造图片字节或下载链接。']
         manifest=await self.artifacts.collect(op,turn.get('artifacts',[]),self.adapter,self.browser_args(op),turn['user_id'])
         result['artifacts']=manifest
         result['unsupported_outputs']=turn.get('unsupported_outputs',[])
@@ -341,5 +399,5 @@ class Service:
     @staticmethod
     def outputs(result):
         return ([{'type':'text','text':result['content']}] if result['content'] else [])+[
-            {'type':'link',**link} for link in result.get('sources',[])]+[{'type':'artifact',**a} for a in result.get('artifacts',[])]+[
+            {'type':'link',**link} for link in result.get('sources',[])]+[{'type':'link','kind':'web_image_reference',**image} for image in result.get('external_images',[])]+[{'type':'artifact',**a} for a in result.get('artifacts',[])]+[
             {'type':'preview',**item,'view_url':result.get('conversation_view_url'),'requires_chatgpt_login':True} for item in result.get('unsupported_outputs',[])]

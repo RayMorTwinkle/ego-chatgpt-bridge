@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ego-chatgpt-bridge"
-version = "0.4.1"
+version = "0.4.2"
 description = "Durable local/LAN Agent bridge using the installed Ego Browser"
 requires-python = ">=3.11"
 dependencies = ["mcp>=1.30,<2", "uvicorn>=0.35,<1", "httpx>=0.28,<1", "python-dotenv>=1,<2", "cryptography>=46,<49"]
@@ -17,6 +17,7 @@ packages = ["src/ego_bridge"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/ego_bridge/browser.mjs" = "ego_bridge/browser.mjs"
+"src/ego_bridge/page-state.mjs" = "ego_bridge/page-state.mjs"
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2"]

@@ -125,6 +125,10 @@ APP="$HOME/apps/ego-chatgpt-bridge"
 
 HTTPS 是可选部署方式：主动设置 `tls_enabled=true` 后运行 `renew-tls` 并配置证书信任；默认 EasyTier 部署不启用。切换 HTTP／HTTPS 使用不同 cookie 名称，切换后需登录一次。
 
+## 联网研究与分段输出
+
+支持长提示词与联网研究的逐段正文读取。创建请求后每5秒轮询 `get_query_result`，读取 `result.content` 的增量并遵循 `next_action`；`result_is_partial=true` 时继续等待，`complete=true` 才是完整交付。`health_check` 为可选浏览器诊断，发送前会独立核验。空间ID属于服务器，客户端不必也不应据此启动本机Ego。
+
 ## 日志与文件保留
 
 图片及文件在成功采集后保留14天；调试 ZIP 和工作文件同样保留14天。服务启动后、此后每小时清理一次，运行中的任务和文件下载会延后物理清理。到期后下载立即停用，API 返回 `EXPIRED`／HTTP410，文字、对话映射和文件校验元数据保留；可用 `collect_artifacts` 尝试从原网页重新采集，不会重新提问，远端文件不保证仍可用。

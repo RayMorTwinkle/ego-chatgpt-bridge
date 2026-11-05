@@ -126,3 +126,11 @@ launchd 的 KeepAlive 保护 supervisor。supervisor 以唯一锁运行，等待
 备份格式2记录 `created_at/expires_at`，整份备份到期点为生成时间+14天及所含产物到期时间的最小值，可能少于14天。每日新快照只纳入未过期AVAILABLE产物。备份中的对话文字随整个快照删除；在线数据库的文字和元数据继续保存。旧格式从ZIP里的SQLite推算原产物采集年龄，不以新复制ZIP的时间给旧图片续期。损坏/不识别的归档保留并报告错误，需人工检查。
 
 旧表新增 `expires_at`，按旧记录 `updated_at+保留期` 回填，不给既有产物重新加14天。新配置只影响新采集/新导出，已记录到期时间不自动延长。运行目录之外的调用方下载、副本及远端ChatGPT会话不由此清理器管理。
+
+### 长提示与联网研究DOM关联（v0.4.2）
+
+`page-state.mjs` 是可独立回放的纯DOM读取器，由 adapter 注入 Ego 脚本。用户消息只读取内容节点，排除折叠按钮、aria-hidden省略号及交互控件；不按文案模糊截断，不移除用户自己输入的相同词语。回答只读取可见、非 tertiary 思考进度的顶层markdown节点，防止第一个“整理研究方向”等状态片段冒充正文，并去除嵌套markdown重复及复制控件。
+
+观察与追问前历史校验共用同一读取器。仅刚提交30秒内的空壳/前缀渲染会继续等待；真正的全文、请求标记或新增轮数不一致仍然拒绝关联，不自动重发。匹配严格通过后，即使未生成完，也先绑定已验证会话并持久化增量正文。原请求可通过只读recover恢复，无需新Query。
+
+Python回归：`uv run pytest -q`。DOM回归：`npm ci --ignore-scripts && npm run test:browser`；Node/linkedom只用于开发测试，运行Python服务不依赖node_modules。回归覆盖真实故障使用的HTML形态，区别于只模拟结构化turn的FakeBrowser测试。私有事故采样在运行目录 verification/incident-*，不得提交到公开仓库。

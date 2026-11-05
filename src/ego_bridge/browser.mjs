@@ -51,32 +51,7 @@ async function runtimeSpace() {
 }
 
 async function state(page) {
-  const result=await page.evaluate(()=>{
-    const visible=e=>!!e?.getClientRects().length && getComputedStyle(e).visibility!=='hidden';
-    const turns=Array.from(document.querySelectorAll('[data-talvt-turn-state]')).map(turn=>{
-      const user=turn.querySelector('[data-chatgpt-search-message-ids]');
-      const response=turn.querySelector('[data-markdown-text-style="assistant-message"]');
-      const selected=turn.querySelector('[data-chatgpt-selection-message-id]');
-      const files=Array.from(turn.querySelectorAll('button[aria-label^="開啟 "][aria-label$=" 預覽"]')).filter(e=>!user?.contains(e));
-      const artifacts=files.map((e,index)=>({kind:'file_card',index,name:e.getAttribute('aria-label').slice(3,-3)}));
-      const images=Array.from(turn.querySelectorAll('img')).filter(e=>!user?.contains(e)&&visible(e)&&e.getBoundingClientRect().width>32&&e.getBoundingClientRect().height>32);
-      for(const [index,image] of images.entries()) artifacts.push({kind:'inline_image',index,name:`image-${index+1}.png`});
-      const unsupported_outputs=Array.from(turn.querySelectorAll('audio,video,canvas,iframe,svg')).filter(e=>!user?.contains(e)&&visible(e)&&e.getBoundingClientRect().width>64&&e.getBoundingClientRect().height>32).map(e=>({kind:e.tagName.toLowerCase(),title:(e.getAttribute('aria-label')||e.getAttribute('title')||'').slice(0,200),export_status:'UNSUPPORTED'}));
-      return {state:turn.getAttribute('data-talvt-turn-state'),user_id:user?.getAttribute('data-chatgpt-search-message-ids')??null,
-        user_text:user?.innerText??'',assistant_id:selected?.getAttribute('data-chatgpt-selection-message-id')??null,
-        assistant_text:response?.innerText??'',sources:response?Array.from(response.querySelectorAll('a[href]')).filter(visible).map(a=>({title:a.innerText,url:a.href})):[],
-        render_ready:!!(response?.innerText.trim()||images.some(i=>i.complete&&i.naturalWidth>0)||unsupported_outputs.length),
-        artifacts,unsupported_outputs,regenerate:!!turn.querySelector('button[aria-label="重新產生回覆"]')};
-    });
-    const editor=document.querySelector('form [contenteditable="true"]');
-    return {url:location.href,title:document.title,turns,editor_present:visible(editor),draft:editor?.innerText??'',
-      model_label:document.querySelector('button[aria-label="選取 ChatGPT 模型"]')?.innerText,
-      buttons:Array.from(document.querySelectorAll('form button')).filter(visible).map(b=>({label:b.getAttribute('aria-label'),disabled:b.disabled})),
-      dialogs:Array.from(document.querySelectorAll('[role="dialog"],[role="alertdialog"]')).filter(visible).map(e=>e.innerText.slice(0,800)),
-      alerts:Array.from(document.querySelectorAll('[role="alert"]')).filter(visible).map(e=>e.innerText.slice(0,800)),
-      login:!editor && Array.from(document.querySelectorAll('button,a')).filter(visible).some(e=>/^(登入|登录|Log in|Sign in)$/.test(e.innerText.trim())),
-      breadcrumb:Array.from(document.querySelectorAll('a[href]')).some(a=>a.getAttribute('href')?.endsWith('/project')&&visible(a))};
-  });
+  const result=await page.evaluate(readChatPage);
   result.identity=identity(result.url);
   return result;
 }
@@ -150,7 +125,7 @@ async function capture(page) {
     const src=await page.evaluate(({userId,index})=>{
       const turn=Array.from(document.querySelectorAll('[data-talvt-turn-state]')).find(t=>t.querySelector('[data-chatgpt-search-message-ids]')?.getAttribute('data-chatgpt-search-message-ids')===userId);
       if(!turn)return null;const user=turn.querySelector('[data-chatgpt-search-message-ids]');
-      const images=Array.from(turn.querySelectorAll('img')).filter(e=>!user?.contains(e)&&e.getClientRects().length&&e.getBoundingClientRect().width>32&&e.getBoundingClientRect().height>32);
+      const images=Array.from(turn.querySelectorAll('img')).filter(e=>!user?.contains(e)&&e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden'&&!e.closest('[data-markdown-text-tone="tertiary"]')&&e.getBoundingClientRect().width>32&&e.getBoundingClientRect().height>32);
       return images[index]?.currentSrc||images[index]?.src;
     },{userId:input.user_message_id,index:c.index});
     if(!src)fail('ARTIFACT_ASSOCIATION_FAILED','当前回答找不到对应图片。','artifact');
@@ -168,7 +143,7 @@ async function capture(page) {
     const turn=Array.from(document.querySelectorAll('[data-talvt-turn-state]')).find(t=>t.querySelector('[data-chatgpt-search-message-ids]')?.getAttribute('data-chatgpt-search-message-ids')===userId);
     if(!turn)return false;
     const user=turn.querySelector('[data-chatgpt-search-message-ids]');
-    const previews=Array.from(turn.querySelectorAll('button[aria-label^="開啟 "][aria-label$=" 預覽"]')).filter(e=>!user?.contains(e));
+    const previews=Array.from(turn.querySelectorAll('button[aria-label^="開啟 "][aria-label$=" 預覽"]')).filter(e=>!user?.contains(e)&&e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden');
     const preview=previews[candidate.index];
     if(!preview||preview.getAttribute('aria-label')!==`開啟 ${candidate.name} 預覽`)return false;
     let card=preview.parentElement;
@@ -313,17 +288,14 @@ async function main() {
     } catch(error){fail('MESSAGE_NOT_LOADED','目标回答尚未完整加载，或消息已发生变化；未执行下载。','artifact');}
   }
   if(input.action==='prepare'&&input.expected_history?.length) {
-    try {
-      await page.waitForFunction(expected=>{
-        const n=s=>String(s??'').replace(/\s+/g,' ').trim();
-        const actual=Array.from(document.querySelectorAll('[data-talvt-turn-state]')).map(turn=>({
-          user_id:turn.querySelector('[data-chatgpt-search-message-ids]')?.getAttribute('data-chatgpt-search-message-ids')??null,
-          user_text:n(turn.querySelector('[data-chatgpt-search-message-ids]')?.innerText),
-          assistant_id:turn.querySelector('[data-chatgpt-selection-message-id]')?.getAttribute('data-chatgpt-selection-message-id')??null,
-          assistant_text:n(turn.querySelector('[data-markdown-text-style="assistant-message"]')?.innerText)}));
-        return JSON.stringify(actual)===JSON.stringify(expected);
-      },input.expected_history,{timeout:15000});
-    } catch(error) {fail('HISTORY_NOT_CONFIRMED','会话历史尚未完整加载，或已被修改；未发送新消息。','prepare');}
+    const expected=JSON.stringify(input.expected_history);let confirmed=false;const until=Date.now()+15000;
+    while(Date.now()<until){
+      const current=await state(page);
+      const actual=current.turns.map(t=>({user_id:t.user_id,user_text:norm(t.user_text),assistant_id:t.assistant_id,assistant_text:norm(t.assistant_text)}));
+      if(JSON.stringify(actual)===expected){confirmed=true;break;}
+      await new Promise(r=>setTimeout(r,200));
+    }
+    if(!confirmed)fail('HISTORY_NOT_CONFIRMED','会话历史尚未完整加载，或已被修改；未发送新消息。','prepare');
   }
   let s=await state(page);
   check(s,input.conversation_url?identity(input.conversation_url).conversation:null);

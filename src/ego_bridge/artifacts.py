@@ -99,13 +99,16 @@ class Artifacts:
         result['mcp_resource_uri']=f"ego-artifact://{row['id']}" if result['status']=='AVAILABLE' else None
         error=result.get("error") or row["error"]
         result["error"] = json.loads(error) if error else None
+        if row.get('kind')=='web_image_reference':
+            result['reference_url']=json.loads(row['candidate']).get('reference_url')
+            result['delivery']='reference_only'
         return result
 
     def list(self, owner: str, operation_id: str) -> list[dict]:
         op = self.store.operation(operation_id)
         if op["owner"] != owner:
             raise BridgeError("ARTIFACT_NOT_FOUND", "找不到该调用方的产物。", stage="artifact")
-        return [self.public(dict(r)) for r in self.store.db.execute("SELECT * FROM artifacts WHERE operation_id=? ORDER BY created_at,id", (operation_id,))]
+        return [self.public(dict(r)) for r in self.store.db.execute("SELECT * FROM artifacts WHERE operation_id=? AND (kind IS NULL OR kind!='web_image_reference') ORDER BY created_at,id", (operation_id,))]
 
     def available_path(self, owner: str, artifact_id: str) -> tuple[dict, Path]:
         row = self.get(owner, artifact_id)
@@ -176,6 +179,21 @@ class Artifacts:
                 temporary.unlink(missing_ok=True)
                 self.store.db.execute("UPDATE artifacts SET status='FAILED',error=?,updated_at=? WHERE id=?", (json.dumps(dict(error_code="ARTIFACT_STORAGE_FAILED",message=str(error))), now(), row["id"]))
         return self.list(op["owner"], op["id"])
+
+    def reconcile_external_references(self,op,references):
+        """Demote legacy external-image failures; never invent downloadable bytes/URLs."""
+        changed=0
+        rows=self.store.db.execute("SELECT * FROM artifacts WHERE operation_id=? AND status='FAILED'",(op['id'],)).fetchall()
+        for row in rows:
+            error=json.loads(row['error'] or '{}');candidate=json.loads(row['candidate'])
+            if error.get('error_code')!='EXTERNAL_IMAGE_NOT_COPIED' or candidate.get('kind')!='inline_image':continue
+            # DOM indices can change during streaming. An old index cannot prove
+            # the URL of an image that has disappeared; current links live in
+            # result.external_images independently.
+            candidate.update(previous_error_code=error['error_code'],reference_url=None)
+            self.store.db.execute("UPDATE artifacts SET status='REFERENCE_ONLY',kind='web_image_reference',candidate=?,error=NULL,updated_at=? WHERE id=?",(json.dumps(candidate),now(),row['id']))
+            changed+=1
+        return changed
 
     def delete_query(self, owner, query_id):
         self.store.query(owner, query_id)

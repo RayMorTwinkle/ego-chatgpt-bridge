@@ -79,12 +79,15 @@ class ExportJobs:
                 page_label=observed['page_label'];state=observed['state'];turns=state['turns']
                 manifest={'export_id':job,'conversation_url':url,'created_at':now(),'read_only':True,
                           'history_scope':'rendered_conversation','history_pagination_verified':False,'turn_count':len(turns),
-                          'artifacts':[],'warnings':['长对话的服务端历史分页尚未验证；归档记录的是本轮已加载的对话内容。']}
+                          'artifacts':[],'external_images':[],'warnings':['长对话的服务端历史分页尚未验证；归档记录的是本轮已加载的对话内容。']}
                 lines=['# ChatGPT 对话导出',f'\n来源：{url}\n']
                 files=[]
                 for n,turn in enumerate(turns,1):
                     lines.extend([f'## {n}. 用户',turn.get('user_text',''),f'## {n}. ChatGPT',turn.get('assistant_text','')])
                     for link in turn.get('sources',[]):lines.append(f"- {link.get('title','链接')}: {link['url']}")
+                    for link in turn.get('external_images',[]):
+                        manifest['external_images'].append({'turn':n,**link})
+                        lines.append(f"- 网页引用图片（仅链接） {link.get('title','图片')}: {link['url']}")
                     if turn.get('state')!='complete':manifest['warnings'].append(f'第 {n} 轮尚未完成生成。')
                     if not turn.get('render_ready',True):manifest['warnings'].append(f'第 {n} 轮的回答正文或图片尚未完成网页渲染，不能确认内容完整。')
                     for gap in turn.get('unsupported_outputs',[]):manifest['warnings'].append(f"第 {n} 轮的 {gap['kind']} 预览尚不支持导出原始文件。")

@@ -1,0 +1,7 @@
+{
+  "name": "ego-bridge-dom-regressions",
+  "private": true,
+  "type": "module",
+  "scripts": {"test:browser": "node --test tests/browser-state.test.mjs"},
+  "devDependencies": {"linkedom": "0.18.15"}
+}

@@ -15,7 +15,7 @@ class EgoAdapter:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.lock = asyncio.Lock()
-        self.script = Path(__file__).with_name("browser.mjs").read_text()
+        self.script = self.script_source()
         directory = Path.home() / "apps/ego-chatgpt-bridge/space-locks"
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         key=hashlib.sha256(settings.space_name.encode()).hexdigest()[:24]
@@ -26,6 +26,11 @@ class EgoAdapter:
         except BlockingIOError:
             self.space_lock.close()
             raise BridgeError("SPACE_BUSY", "另一个桥接进程正在操作该 Ego 空间。", action=True)
+
+    @staticmethod
+    def script_source():
+        helper=Path(__file__).with_name('page-state.mjs').read_text().replace('export function readChatPage','function readChatPage')
+        return helper+'\n'+Path(__file__).with_name('browser.mjs').read_text()
 
     def close(self):
         self.space_lock.close()

@@ -32,7 +32,8 @@ async def test_real_sdk_handshake_tools_and_owner_context(tmp_path):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),headers={'Authorization':'Bearer '+'a'*40}) as http:
             async with streamable_http_client('https://localhost/mcp',http_client=http) as (read,write,_):
                 async with ClientSession(read,write) as session:
-                    await session.initialize()
+                    initialization=await session.initialize()
+                    assert 'result_is_partial' in initialization.instructions and '服务端' in initialization.instructions
                     names={t.name for t in (await session.list_tools()).tools}
                     assert {'create_query','continue_query','get_query_status','get_query_result','list_queries','health_check','diagnose'}<=names
                     result=await session.call_tool('list_queries',{})

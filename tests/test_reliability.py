@@ -350,3 +350,54 @@ async def test_policy_rejections_before_browser_actions(rig,bad):
     s,db,fake=rig
     r=await s.dispatch('alice','create_query',dict({'text':'x','request_id':'r'},**bad))
     assert not r['ok'] and not fake.sent and not db.candidates()
+
+async def test_hydrating_user_bubble_is_pending_then_streams_without_resend(rig):
+    s,db,fake=rig
+    fake.complete=False
+    a=await create(s,text='Research across multiple\nparagraphs with sources')
+    await execute(s,db,a)
+    turn=fake.pages['p1'][0]
+    original=turn['user_text'];turn.update(user_text='',user_id=None,assistant_text='',render_ready=False)
+    await s.observe(db.operation(a['message_id']))
+    assert db.operation(a['message_id'])['status']=='WAITING_FOR_RESPONSE'
+    turn.update(user_text=original,user_id='u1',assistant_text='First research section',render_ready=True)
+    await s.observe(db.operation(a['message_id']))
+    partial=await s.dispatch('alice','get_query_result',{'query_id':a['query_id']})
+    assert partial['status']=='GENERATING' and not partial['complete']
+    assert partial['result']['content']=='First research section'
+    assert partial['result_is_partial'] and partial['next_action']['tool']=='get_query_result'
+    turn.update(assistant_text='First research section\nSecond research section',state='complete',regenerate=True)
+    await s.observe(db.operation(a['message_id']))
+    final=await s.dispatch('alice','get_query_result',{'query_id':a['query_id']})
+    assert final['complete'] and not final['result_is_partial'] and len(fake.sent)==1
+
+
+async def test_association_failure_explains_specific_mismatch_and_server_managed_browser(rig):
+    s,db,fake=rig
+    a=await create(s)
+    await execute(s,db,a)
+    fake.pages['p1'][0]['user_text']='Different message'
+    await s.observe(db.operation(a['message_id']))
+    r=await s.dispatch('alice','diagnose',{'query_id':a['query_id']})
+    context=r['last_error']['diagnostic_context']
+    assert context['reason']=='user_text_mismatch'
+    assert context['expected_new_turn_count']==1 and context['observed_new_turn_count']==1
+    assert context['expected_user_text_sha256']!=context['observed_user_text_sha256']
+    assert context['request_marker_present'] is False
+    assert r['execution_context']['browser_location']=='bridge_server'
+    assert r['next_action']['tool']=='recover_session'
+    assert 'Different message' not in str(context)
+    assert len(fake.sent)==1
+
+
+async def test_health_failure_is_advisory_and_does_not_block_independently_verified_send(rig):
+    s,db,fake=rig;original=fake.call
+    async def health_timeout(action,**kw):
+        if action=='health':raise BridgeError('BROWSER_TIMEOUT','injected browser page timeout',stage='health')
+        return await original(action,**kw)
+    fake.call=health_timeout
+    result=await s.dispatch('alice','health_check',{})
+    assert not result['ok'] and result['health_check_is_advisory'] and result['service_available']
+    assert result['execution_context']['client_local_browser_cli_required'] is False
+    task=await create(s);await execute(s,db,task)
+    assert len(fake.sent)==1 and db.operation(task['message_id'])['status']=='WAITING_FOR_RESPONSE'

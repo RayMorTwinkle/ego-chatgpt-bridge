@@ -18,3 +18,5 @@ docs/chatgpt-ui-verification.md
 docs/validation.md
 *.pyc
 .DS_Store
+
+node_modules/

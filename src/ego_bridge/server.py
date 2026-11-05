@@ -134,7 +134,7 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
                     tool.meta={**(tool.meta or {}),'securitySchemes':schemes}
                     tool.model_extra['securitySchemes']=schemes
             return tools
-    mcp = BridgeMCP("Ego ChatGPT Bridge", stateless_http=True, json_response=True, transport_security=security)
+    mcp = BridgeMCP("Ego ChatGPT Bridge", instructions="本服务在桥接服务器的 Ego Browser 中执行固定专案 GPT-6 研究。create_query 返回持久化任务，不代表完成；每5秒 get_query_result 读取 result.content 的累计快照（可能增长或修订，替换旧快照勿盲目拼接），result_is_partial=true 时继续等待，仅 complete=true 为最终交付。遵循 next_action。health_check 是可选浏览器诊断，失败不等于服务整体不可用，不要高频调用。OUTCOME_UNKNOWN 只用 recover_session/diagnose，切勿换幂等键重发。空间ID只在服务端浏览器实例有效，不要在客户端本机 ego-browser 查找；需要人工处理时把诊断交给维护者。文件和图片用 read_artifact 或 resources/read 获取。", stateless_http=True, json_response=True, transport_security=security)
 
     async def call(ctx: Context, name: str, args: dict):
         # Use request state, not a global user/session variable: sessions must not leak ownership.
@@ -143,7 +143,7 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
 
     @mcp.tool()
     async def create_query(text: str, request_id: str, ctx: Context, effort: str = "extra_high", model: str = "GPT-6", soft_timeout: float = 600, hard_timeout: float = 3600) -> dict[str, Any]:
-        """在固定项目新建异步查询。request_id 是调用方作用域的幂等键。只允许 GPT-6 和 extra_high/high。"""
+        """在服务端固定专案新建异步查询，支持长文和多段提示词。返回 Query ID 后用 get_query_result 每5秒轮询，可先读取 result.content 的增量正文；仅 complete=true 才完成。request_id 是调用方作用域幂等键，超时勿换键重发。浏览器在桥接服务器，本机空间编号无关。只允许 GPT-6 和 extra_high/high。"""
         return await call(ctx, "create_query", dict(text=text, request_id=request_id, effort=effort, model=model, soft_timeout=soft_timeout, hard_timeout=hard_timeout))
 
     @mcp.tool()
@@ -158,7 +158,7 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
 
     @mcp.tool()
     async def get_query_result(query_id: str, ctx: Context, message_id: str | None = None) -> dict[str, Any]:
-        """获取回答、来源和完整性；未完成的内容不会标记 complete=true。"""
+        """轮询同一 Query/消息操作，返回逐步增长的 result.content、来源、progress 和 next_action。result_is_partial=true 表示尚在输出，可先读后继续等待；complete=true 才是最终交付。未完成不是失败；勿重发。"""
         return await call(ctx, "get_query_result", dict(query_id=query_id, message_id=message_id))
 
     @mcp.tool()
@@ -168,12 +168,12 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
 
     @mcp.tool()
     async def health_check(ctx: Context) -> dict[str, Any]:
-        """实际检查 Ego、专用空间、账户显示名称、项目及模型选择器。"""
+        """可选的服务端浏览器诊断，检查空间、账户、专案及模型选择器；会操作网页控件，可能比普通状态查询慢。不是 create_query 的准入门槛，失败不代表服务整体不可用；每个发送操作仍会独立核验。不要高频调用。"""
         return await call(ctx, "health_check", {})
 
     @mcp.tool()
     async def diagnose(ctx: Context, query_id: str | None = None, message_id: str | None = None) -> dict[str, Any]:
-        """返回任务状态、错误、转换记录或服务诊断，不包含普通日志中的敏感正文。"""
+        """返回任务状态、具体消息关联差异、转换记录和服务端执行环境。空间编号仅在桥接服务器有效，不要用客户端本机 ego-browser 查找。持续恢复失败时把此证据交给维护者；诊断不返回完整提示词或浏览器凭据。"""
         return await call(ctx, "diagnose", dict(query_id=query_id, message_id=message_id))
 
     @mcp.tool()
