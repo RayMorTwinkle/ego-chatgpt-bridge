@@ -420,15 +420,22 @@ async def test_completion_requires_stable_entire_turn_and_resets_on_more_output(
     assert r['complete'] and r['extraction_stable'] and r['semantic_validation']=='not_performed'
     assert len(fake.sent)==1
 
-async def test_wait_cursor_suppresses_unchanged_content_and_preserves_owner_scope(rig):
+async def test_wait_cursor_suppresses_unchanged_content_and_preserves_owner_scope(rig, monkeypatch):
     s,db,fake=rig
     fake.complete=False
-    a=await create(s);await execute(s,db,a);await s.observe(db.operation(a['message_id']))
+    a=await create(s, soft_timeout=1);await execute(s,db,a);await s.observe(db.operation(a['message_id']))
     args={'query_id':a['query_id'],'timeout_seconds':0,'include_content':True}
     first=await s.dispatch('alice','wait_query',args)
     assert first['changed'] and first['result']['content']=='partial'
+    later = first['progress']['last_observed_at'] + 2
+    monkeypatch.setattr('ego_bridge.service.now', lambda: later)
+    await s.observe(db.operation(a['message_id']))
     again=await s.dispatch('alice','wait_query',{**args,'cursor':first['cursor']})
-    assert not again['changed'] and 'result' not in again
+    assert again['timed_out'] and not again['changed'] and 'result' not in again
+    assert again['progress']['last_observed_at'] == later
+    assert again['progress']['answer_characters'] == len('partial')
+    assert again['progress']['source_count'] == 0
+    assert again['soft_timeout_exceeded']
     assert not (await s.dispatch('bob','wait_query',args))['ok']
     fake.pages['p1'][0]['assistant_text']='revised'
     await s.observe(db.operation(a['message_id']))

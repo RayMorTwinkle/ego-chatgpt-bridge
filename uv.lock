@@ -225,12 +225,13 @@ wheels = [
 
 [[package]]
 name = "ego-chatgpt-bridge"
-version = "0.4.4"
+version = "0.4.5"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "mcp" },
+    { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "uvicorn" },
 ]
@@ -246,6 +247,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=46,<49" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "mcp", specifier = ">=1.30,<2" },
+    { name = "pydantic", specifier = ">=2,<3" },
     { name = "python-dotenv", specifier = ">=1,<2" },
     { name = "uvicorn", specifier = ">=0.35,<1" },
 ]

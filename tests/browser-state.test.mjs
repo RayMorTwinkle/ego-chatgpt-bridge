@@ -168,3 +168,21 @@ test('live CodeMirror widgets preserve language and every editor line',()=>{
   assert.equal(turn.render_ready,true);
   assert.equal(turn.assistant_markdown,'```python\ns = 4\n\n\nprint(s)\n```');
 });
+
+test('adjacent and empty DOM blocks share one blank line without changing code or math',()=>{
+  fixture(user()+String.raw`<div data-markdown-text-style="assistant-message">
+    <h2>Heading</h2>
+    <section><p>First paragraph.</p><p><br></p><p>Second paragraph.</p></section>
+    <pre><code class="language-python">x = 1
+
+
+print(x)</code></pre>
+    <div data-d-block data-d-component="math"><p>[x=1
+
+
+y=2]</p></div>
+    <p>End.</p>
+  </div>`,'complete');
+  const md=readChatPage().turns[0].assistant_markdown;
+  assert.equal(md,'## Heading\n\nFirst paragraph.\n\nSecond paragraph.\n\n```python\nx = 1\n\n\nprint(x)\n```\n\n$$\nx=1\n\n\ny=2\n$$\n\nEnd.');
+});

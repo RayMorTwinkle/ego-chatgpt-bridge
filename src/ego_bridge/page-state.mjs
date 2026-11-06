@@ -30,11 +30,31 @@ export function readChatPage() {
     for(const match of raw.matchAll(/`+/g))length=Math.max(length,match[0].length+1);
     return '`'.repeat(length);
   }
+  function joinMarkdown(parts){
+    // Coalesce only fragment boundaries. Code and math keep their internal newlines.
+    const chunks=[];
+    let breaks=0;
+    for(const part of parts){
+      const leading=part.match(/^\n+/)?.[0].length??0;
+      breaks=Math.min(2,breaks+leading);
+      const body=part.slice(leading);
+      if(!body||(breaks&&/^[ \t]+$/.test(body)))continue;
+      const trailing=body.match(/\n+$/)?.[0].length??0;
+      chunks.push('\n'.repeat(breaks),body.slice(0,body.length-trailing));
+      breaks=Math.min(2,trailing);
+    }
+    return chunks.join('')+'\n'.repeat(breaks);
+  }
   function markdown(node){
-    if(node.nodeType===3)return (node.textContent||'').replace(/([\\`*_[\]<>])/g,'\\$1');
+    if(node.nodeType===3){
+      const raw=node.textContent||'';
+      // Indentation in the HTML source is whitespace between inline or block siblings.
+      if(/^\s+$/.test(raw)&&raw.includes('\n'))return ' ';
+      return raw.replace(/([\\`*_[\]<>])/g,'\\$1');
+    }
     if(node.nodeType!==1||node.matches(ignored))return '';
     const tag=node.tagName.toLowerCase();
-    const children=()=>Array.from(node.childNodes).map(markdown).join('');
+    const children=()=>joinMarkdown(Array.from(node.childNodes,markdown));
     if(node.matches('.katex-display,.katex,math,[data-d-component="math"]')){
       const display=node.matches('.katex-display,[display="block"],[data-d-block]');
       let tex=node.querySelector('annotation[encoding="application/x-tex"]')?.textContent?.trim();
@@ -91,7 +111,7 @@ export function readChatPage() {
     }
     if(tag==='blockquote')return '\n\n'+value.trim().split('\n').map(l=>'> '+l).join('\n')+'\n\n';
     if(tag==='hr')return '\n\n---\n\n';
-    return /^(p|div|section|article|ul|ol)$/.test(tag)?'\n\n'+value.trim()+'\n\n':value;
+    return /^(p|div|section|article|ul|ol)$/.test(tag)?(value.trim()?'\n\n'+value.trim()+'\n\n':''):value;
   }
   const generation_active=Array.from(document.querySelectorAll('form button')).some(e=>visible(e)&&/stop|停止|停止串流/i.test(e.getAttribute('aria-label')||''));
   const turns=Array.from(document.querySelectorAll('[data-talvt-turn-state]')).map(turn=>{
@@ -136,7 +156,7 @@ export function readChatPage() {
       plain_text_characters:answer.length,dom_inner_text_characters:responses.reduce((n,e)=>n+(e.innerText||e.textContent||'').length,0),
       table_count:responses.reduce((n,e)=>n+e.querySelectorAll('table').length,0),
       blocks:responses.map((e,index)=>({index,message_id:(e.closest('[data-chatgpt-selection-message-id]')||e.querySelector('[data-chatgpt-selection-message-id]'))?.getAttribute('data-chatgpt-selection-message-id')||null,characters:text(e).length}))};
-    return {assistant_markdown:render_error?'':responses.map(markdown).join('\n\n').trim(),extraction,generation_active,render_error,state:turn.getAttribute('data-talvt-turn-state'),user_id:user?.getAttribute('data-chatgpt-search-message-ids')??null,
+    return {assistant_markdown:render_error?'':joinMarkdown(responses.flatMap((response,index)=>index?['\n\n',markdown(response)]:[markdown(response)])).trim(),extraction,generation_active,render_error,state:turn.getAttribute('data-talvt-turn-state'),user_id:user?.getAttribute('data-chatgpt-search-message-ids')??null,
       user_text:text(user?.querySelector('[data-search-result-target]')||user),assistant_id:selected?.getAttribute('data-chatgpt-selection-message-id')??null,
       assistant_text:answer,sources,external_images,render_ready:!render_error&&!pendingCode&&!!(answer||native_images.some(i=>i.complete&&i.naturalWidth>0)||external_images.length||unsupported_outputs.length)&&native_images.every(i=>i.complete&&i.naturalWidth>0),
       artifacts,unsupported_outputs,regenerate:!!turn.querySelector('button[aria-label="重新產生回覆"]'),

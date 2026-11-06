@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-import hmac
-from importlib.metadata import version
 import base64
+import hmac
 import ipaddress
 import json
+import logging
 from contextlib import asynccontextmanager
-from typing import Any
+from importlib.metadata import version
+from typing import Annotated, Any
+from uuid import uuid4
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp import types
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import Field
 from starlette.applications import Starlette
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
@@ -18,11 +21,28 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
 from .adapter import EgoAdapter
-from .model import Settings, BridgeError
+from .model import Settings, BridgeError, now
 from .service import LONG_RESEARCH_GUIDANCE, Service
 from .store import Store
 from .auth import load_clients
 from .oauth import PUBLIC_PATHS
+
+
+SUBMISSION_TOOLS = {"create_query", "continue_query"}
+submission_log = logging.getLogger("ego_bridge.submission")
+
+SoftTimeout = Annotated[float, Field(description=(
+    "秒，預設 600。提交前從入列起算，進入提交後從提交時間起算。"
+    "超過時回傳 soft_timeout_exceeded=true，任務繼續執行。"
+))]
+HardTimeout = Annotated[float, Field(description=(
+    "秒，預設 3600，從進入提交時計算。觀察到逾時且尚未完成時，橋接器停止自動觀察並標記 NEEDS_ATTENTION。"
+    "網頁可能仍在生成，請使用原 ID 呼叫 recover_session 對帳，再用 get_query_result 取回結果。"
+))]
+WaitTimeout = Annotated[float, Field(description=(
+    "本次等待的秒數，範圍 0–30，預設 25。0 會立即取快照。"
+    "timed_out=true 只表示本次等候未見新變化，任務會繼續，請用原 ID 和 cursor 再等。"
+))]
 
 
 class TokenAuth:
@@ -41,6 +61,8 @@ class TokenAuth:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
+        http_received_at = now()
+        path = scope["path"]
         try:
             peer = ipaddress.ip_address(scope["client"][0])
             peer = getattr(peer, "ipv4_mapped", None) or peer
@@ -54,7 +76,6 @@ class TokenAuth:
             return await JSONResponse({"ok": False, "error": {"error_code": "SOURCE_NETWORK_DENIED"}}, status_code=403)(scope, receive, send)
         headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
         ui = scope.get('path') in {'/','/ui'} or scope.get('path','').startswith('/ui/')
-        path = scope.get('path','')
         oauth_route = self.oauth and path in PUBLIC_PATHS - {'/mcp'}
         token = headers.get('authorization','').removeprefix('Bearer ') if headers.get('authorization','').startswith('Bearer ') else ''
         owner = self.owner(headers.get("authorization", "")) if not ui and not public and not oauth_route else None
@@ -89,16 +110,25 @@ class TokenAuth:
                     return await JSONResponse({"error": "REQUEST_TOO_LARGE"}, status_code=413)(scope, receive, send)
                 if not message.get("more_body"):
                     break
+            name = path.removeprefix("/api/") if path.startswith("/api/") else None
+            if path == "/mcp":
+                try:
+                    data = json.loads(body)
+                    if data.get("method") == "tools/call":
+                        candidate = data.get("params", {}).get("name")
+                        name = candidate if isinstance(candidate, str) else None
+                except (ValueError, TypeError, AttributeError):
+                    pass
             if scopes is not None:
                 from .oauth import WRITE_TOOLS
-                required = 'research:read'
-                try:
-                    data=json.loads(body)
-                    name=path.split('/')[-1] if path.startswith('/api/') else data.get('params',{}).get('name') if data.get('method')=='tools/call' else None
-                    if name in WRITE_TOOLS:required='research:write'
-                except (ValueError,TypeError,AttributeError):pass
+                required = 'research:write' if name in WRITE_TOOLS else 'research:read'
                 if required not in scopes:
                     return await JSONResponse({'error':'insufficient_scope'},status_code=403,headers={'WWW-Authenticate':self.oauth.challenge()+', error="insufficient_scope", scope="'+required+'"'})(scope,receive,send)
+            if name in SUBMISSION_TOOLS:
+                trace = {"trace_id": uuid4().hex, "http_received_at": http_received_at}
+                scope["state"]["submission_trace"] = trace
+                route = "mcp" if path == "/mcp" else "api"
+                submission_log.info("submission_received %s", json.dumps({**trace, "transport": route, "tool": name}))
             delivered = False
             async def replay_receive():
                 nonlocal delivered
@@ -151,20 +181,36 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
     )
     mcp._mcp_server.version = version("ego-chatgpt-bridge")
 
-    async def call(ctx: Context, name: str, args: dict):
+    async def dispatch_http(request: Request, name: str, args: dict):
         # Use request state, not a global user/session variable: sessions must not leak ownership.
-        owner = ctx.request_context.request.state.owner
-        return await service.dispatch(owner, name, args)
+        owner = request.state.owner
+        received = getattr(request.state, "submission_trace", None)
+        if received is None:
+            return await service.dispatch(owner, name, args)
+
+        trace = {**received, "dispatch_started_at": now()}
+        result = await service.dispatch(owner, name, args)
+        trace["response_ready_at"] = now()
+        if result.get("accepted"):
+            trace["operation_created_at"] = result["created_at"]
+            outcome = {**trace, "query_id": result["query_id"], "message_id": result["message_id"]}
+        else:
+            outcome = {**trace, "error_code": (result.get("error") or {}).get("error_code")}
+        submission_log.info("submission_result %s", json.dumps(outcome))
+        return {**result, "submission_trace": trace}
+
+    async def call(ctx: Context, name: str, args: dict):
+        return await dispatch_http(ctx.request_context.request, name, args)
 
     @mcp.tool(description=LONG_RESEARCH_GUIDANCE + (
         "在固定專案新建非同步查詢。request_id 是呼叫方的冪等鍵。"
         "支援 GPT-6 的 extra_high 與 high。context_mode=request_only_best_effort 可附加範圍約束。"
     ))
-    async def create_query(text: str, request_id: str, ctx: Context, effort: str = "extra_high", model: str = "GPT-6", soft_timeout: float = 600, hard_timeout: float = 3600, context_mode: str = "project") -> dict[str, Any]:
+    async def create_query(text: str, request_id: str, ctx: Context, effort: str = "extra_high", model: str = "GPT-6", soft_timeout: SoftTimeout = 600, hard_timeout: HardTimeout = 3600, context_mode: str = "project") -> dict[str, Any]:
         return await call(ctx, "create_query", dict(text=text, request_id=request_id, effort=effort, model=model, soft_timeout=soft_timeout, hard_timeout=hard_timeout, context_mode=context_mode))
 
     @mcp.tool()
-    async def continue_query(query_id: str, text: str, request_id: str, ctx: Context, effort: str = "extra_high", soft_timeout: float = 600, hard_timeout: float = 3600, context_mode: str = "project") -> dict[str, Any]:
+    async def continue_query(query_id: str, text: str, request_id: str, ctx: Context, effort: str = "extra_high", soft_timeout: SoftTimeout = 600, hard_timeout: HardTimeout = 3600, context_mode: str = "project") -> dict[str, Any]:
         """在 Query ID 对应的同一网页会话追加消息；同会话按接收顺序执行。"""
         return await call(ctx, "continue_query", dict(query_id=query_id, text=text, request_id=request_id, effort=effort, soft_timeout=soft_timeout, hard_timeout=hard_timeout, context_mode=context_mode))
 
@@ -189,8 +235,8 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
 
     @mcp.tool(structured_output=False)
     async def wait_query(query_id: str, ctx: Context, message_id: str | None = None, cursor: str | None = None,
-            timeout_seconds: float = 25, include_content: bool = False, content_format: str = "markdown") -> types.CallToolResult:
-        """等待狀態或內容變化，單次最長 30 秒。請帶回上次 cursor。timed_out=true 只表示這次等待沒有新變化，請依 next_action 繼續等待原任務。generation_done 可能回退，僅 complete=true 後取最終結果。include_content=true 時回傳累計快照。"""
+            timeout_seconds: WaitTimeout = 25, include_content: bool = False, content_format: str = "markdown") -> types.CallToolResult:
+        """等待狀態或內容變化，單次最長 30 秒。帶回上次 cursor。即使本次沒有新變化，progress 仍提供最近觀測時間、正文長度及來源數。依 next_action 繼續原任務，僅 complete=true 後取得最終結果。include_content=true 時回傳累計快照。"""
         return result_envelope(await call(ctx,'wait_query',dict(query_id=query_id,message_id=message_id,cursor=cursor,
             timeout_seconds=timeout_seconds,include_content=include_content,content_format=content_format)))
 
@@ -296,7 +342,7 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
                 raise ValueError()
         except (ValueError, json.JSONDecodeError):
             return JSONResponse({"ok": False, "error": {"error_code": "INVALID_JSON"}}, status_code=400)
-        return JSONResponse(await service.dispatch(request.state.owner, request.path_params["tool"], args))
+        return JSONResponse(await dispatch_http(request, request.path_params["tool"], args))
 
     async def download_artifact(request: Request):
         try:

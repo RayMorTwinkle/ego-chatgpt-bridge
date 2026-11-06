@@ -1,4 +1,6 @@
 from importlib.metadata import version
+import json
+import logging
 
 import httpx
 from mcp import ClientSession
@@ -28,7 +30,8 @@ async def test_auth_host_origin_and_body_boundaries(tmp_path):
             assert r.json()['error']['error_code']=='QUERY_NOT_FOUND'
 
 
-async def test_real_sdk_handshake_tools_and_owner_context(tmp_path):
+async def test_real_sdk_handshake_tools_and_owner_context(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="ego_bridge.submission")
     app=build_app(Settings(tmp_path),adapter=FakeBrowser(),clients={'alice':'a'*40})
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),headers={'Authorization':'Bearer '+'a'*40}) as http:
@@ -37,13 +40,34 @@ async def test_real_sdk_handshake_tools_and_owner_context(tmp_path):
                     initialization=await session.initialize()
                     assert 'result_is_partial' in initialization.instructions and '服務端' in initialization.instructions
                     assert initialization.serverInfo.version == version("ego-chatgpt-bridge")
-                    catalog={t.name:t.description for t in (await session.list_tools()).tools}
+                    tools = {t.name: t for t in (await session.list_tools()).tools}
+                    catalog = {name: tool.description for name, tool in tools.items()}
                     assert {'create_query','continue_query','get_query_status','get_query_result','list_queries','health_check','diagnose','wait_query'}<=catalog.keys()
+                    for name, parameter in [('create_query', 'soft_timeout'), ('continue_query', 'hard_timeout'), ('wait_query', 'timeout_seconds')]:
+                        assert '秒' in tools[name].inputSchema['properties'][parameter]['description']
                     result=await session.call_tool('list_queries',{})
                     assert not result.isError
                     assert result.structuredContent['ok']
                     assert result.structuredContent['queries']==[]
-                    created=(await session.call_tool('create_query',{'text':'test','request_id':'sdk-wait'})).structuredContent
+                    submission = {'text': 'private research text', 'request_id': 'sdk-wait'}
+                    created=(await session.call_tool('create_query',submission)).structuredContent
+                    duplicate=(await session.call_tool('create_query',submission)).structuredContent
+                    trace = created['submission_trace']
+                    assert trace['http_received_at'] <= trace['dispatch_started_at'] <= trace['operation_created_at'] <= trace['response_ready_at']
+                    assert duplicate['message_id'] == created['message_id']
+                    assert duplicate['submission_trace']['operation_created_at'] == trace['operation_created_at']
+                    assert duplicate['submission_trace']['trace_id'] != trace['trace_id']
+                    matching = []
+                    for record in caplog.records:
+                        if record.name != 'ego_bridge.submission':
+                            continue
+                        event, body = record.getMessage().split(' ', 1)
+                        assert submission['text'] not in body and submission['request_id'] not in body
+                        entry = json.loads(body)
+                        if entry['trace_id'] == trace['trace_id']:
+                            matching.append((event, entry))
+                    assert [event for event, _ in matching] == ['submission_received', 'submission_result']
+                    assert matching[1][1]['query_id'] == created['query_id']
                     assert created['accepted'] and created['next_action']['tool']=='wait_query'
                     for phrase in ('10 分鐘以上','wait_query','請勿重送','complete=true'):
                         assert all(phrase in channel for channel in (
@@ -52,6 +76,7 @@ async def test_real_sdk_handshake_tools_and_owner_context(tmp_path):
                     waited=await session.call_tool('wait_query',{'query_id':created['query_id'],'timeout_seconds':0})
                     assert not waited.isError and waited.structuredContent['changed']
                     assert 'result' not in waited.structuredContent
+                    assert 'progress' in waited.structuredContent
                     next_action=waited.structuredContent.get('next_action')
                     if next_action:assert next_action['arguments']['cursor']==waited.structuredContent['cursor']
                     body=await session.call_tool('get_query_result',{'query_id':created['query_id'],'include_content':False})

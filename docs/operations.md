@@ -143,3 +143,5 @@ Python回归：`uv run pytest -q`。DOM回归：`npm ci --ignore-scripts && npm 
 `health_check` 使用独立临时专案页并在结束后关闭，避免既有卡死页面和正在生成的会话。失败返回 `health.probe`、`health.worker`、`submission_blocked_by_probe=false`、最近核验请求页面。超时不再要求客户端用户处理整个服务；登录/账户/配置问题仍保留相应人工处理要求。兼容字段 `service_available=true` 的范围由 `availability_scope=http_api_only` 限定。worker running 也不保证下一次浏览器操作必定成功。
 
 轮询优先 `wait_query`，单次0..30秒，不持有浏览器控制锁。cursor 对状态/内容/产物变化计算，忽略单纯观测时间刷新；响应是替换快照，非字符追加协议。客户端用上次 cursor，完成后按需取正文。CLI `--wait` 已改用该接口。Markdown 是从 DOM 重建，表格/链接保留，特殊交互式内容仍不能保证无损。
+
+MCP 與 HTTP API 收到通過驗證的研究提交後，`service.log` 記下 `submission_received`，並保留請求進入橋接器時的 `http_received_at`。派送結束時，`submission_result` 用同一個 `trace_id` 關聯結果及任務 ID。兩筆紀錄只含服務端產生的識別碼、時間、工具、傳輸類型或錯誤代碼，沿用既有日誌輪替。呼叫端的授權及代理轉發時間需另用各層的紀錄核對。

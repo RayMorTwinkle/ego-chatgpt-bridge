@@ -113,6 +113,7 @@ class Service:
 
     def view(self, op: dict) -> dict:
         q = self.store.query(op["owner"], op["query_id"])
+        elapsed = now() - (op["submitted_at"] or op["created_at"])
         return dict(query_id=q["id"], message_id=op["id"], request_id=op["request_id"], sequence=op["sequence"], status=op["status"],
                     conversation_id=q["conversation_id"], conversation_url=q["conversation_url"],
                     project_identifier=q["project_id"], space_identifier=q["space_id"],
@@ -120,6 +121,7 @@ class Service:
                     requested_model="GPT-6", requested_effort=op["payload"]["effort"],
                     observed=op["observed"], last_error=op["error"], blocked_predecessor=self.blocked_predecessor(op),
                     created_at=op["created_at"], updated_at=op["updated_at"],
+                    soft_timeout_exceeded=elapsed > op["payload"]["soft_timeout"] and op["status"] not in TERMINAL,
                     execution_context=self.execution_context(),next_action=self.next_action(op),
                     progress={'answer_characters':len((op.get('result') or {}).get('content','')),
                         'source_count':len((op.get('result') or {}).get('sources',[])),
@@ -192,8 +194,7 @@ class Service:
         if op["owner"] != owner or op["query_id"] != qid:
             raise BridgeError("OPERATION_NOT_FOUND", "该消息不属于指定会话。")
         if tool == "get_query_status":
-            elapsed = now() - (op["submitted_at"] or op["created_at"])
-            return {"ok": True, **self.view(op), "soft_timeout_exceeded": elapsed > op["payload"]["soft_timeout"] and op["status"] not in TERMINAL}
+            return {"ok": True, **self.view(op)}
         if tool == "get_query_result":
             result = dict(op["result"] or {})
             result.pop("history", None)
@@ -229,7 +230,13 @@ class Service:
             if output.get('next_action',{} ) and output['next_action']['tool']=='wait_query':
                 output['next_action']['arguments']['cursor']=output['cursor']
             if args.get('compact',False):
-                output={k:v for k,v in output.items() if k in {'ok','query_id','message_id','status','complete','generation_complete','generation_done','extraction_stable','delivery_complete','delivery_expired','result_is_partial','semantic_validation','cursor','last_error','conversation_id','conversation_url','observed','next_action'}}
+                output = {k: v for k, v in output.items() if k in {
+                    'ok', 'query_id', 'message_id', 'status', 'complete', 'generation_complete',
+                    'generation_done', 'extraction_stable', 'delivery_complete', 'delivery_expired',
+                    'result_is_partial', 'semantic_validation', 'cursor', 'last_error',
+                    'conversation_id', 'conversation_url', 'observed', 'next_action',
+                    'progress', 'soft_timeout_exceeded',
+                }}
             if args.get('include_content',True):
                 fmt=args.get('content_format','text')
                 if fmt not in {'text','markdown'}:raise BridgeError('INVALID_ARGUMENT','content_format 必须为 text 或 markdown。')

@@ -29,7 +29,15 @@ text 为 1..100000 字符，request_id 为 1..200 字符。默认 soft_timeout=6
 
 Query ID 对应一个 Conversation；Message ID 对应一次输入／响应。幂等键属于调用方：同键同参数复用原操作，异参冲突。发送文本带内部请求标记以便页面对账，这不是网页服务端提供的幂等键。
 
-`create_query` 回傳 `accepted=true`、任務識別碼與 `waiting_guidance`。單次任務可能需要 10 分鐘以上。帶回 `wait_query` 回傳的 cursor 繼續等候原任務，單次等候的 `timed_out=true` 表示沒有新變化。 `generation_done` 可能隨網頁狀態回退，請以 `complete=true` 判定交付，再驗收內容品質。
+`create_query` 回傳 `accepted=true`、任務識別碼與 `waiting_guidance`。單次任務可能需要 10 分鐘以上。帶回 `wait_query` 回傳的 cursor 繼續等候原任務。`progress` 提供最近觀測時間、正文長度和來源數，即使 cursor 未變也會回傳。`last_observed_at` 是最近的觀測時間，正文可能與前一次相同。`generation_done` 可能隨網頁狀態回退，請以 `complete=true` 判定交付，再驗收內容品質。
+
+| 超時參數（秒） | 觸發後的行為 |
+| --- | --- |
+| `wait_query.timeout_seconds`（預設 25，範圍 0–30） | 這次等待結束。`timed_out=true` 表示這次未見新變化，保留原 ID 和 cursor 繼續等待。0 會立即取快照。 |
+| `soft_timeout`（預設 600） | `soft_timeout_exceeded=true` 提醒呼叫端，任務繼續。進入提交前從入列起算，之後從提交時間起算。 |
+| `hard_timeout`（預設 3600） | 從進入提交起算。若後續觀察發現超時且尚未完成，橋接器停止自動觀察並標記 `NEEDS_ATTENTION`。網頁可能繼續生成。用原 ID 執行 `recover_session` 對帳，再依 `next_action` 取得結果。 |
+
+MCP 或 HTTP API 提交回應的 `submission_trace` 提供服務端入口、工具派送、任務建立及回應就緒時間，皆為 Unix 秒。`trace_id` 可對照服務日誌。用同一個冪等鍵重試時，會有本次呼叫的 trace ID，任務建立時間沿用原操作。
 
 ## 结果
 
