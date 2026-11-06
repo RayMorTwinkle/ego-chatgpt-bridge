@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+from importlib.metadata import version
 import base64
 import ipaddress
 import json
@@ -18,7 +19,7 @@ from starlette.routing import Mount, Route
 
 from .adapter import EgoAdapter
 from .model import Settings, BridgeError
-from .service import Service
+from .service import LONG_RESEARCH_GUIDANCE, Service
 from .store import Store
 from .auth import load_clients
 from .oauth import PUBLIC_PATHS
@@ -134,16 +135,32 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
                     tool.meta={**(tool.meta or {}),'securitySchemes':schemes}
                     tool.model_extra['securitySchemes']=schemes
             return tools
-    mcp = BridgeMCP("Ego ChatGPT Bridge", instructions="本服务在桥接服务器的 Ego Browser 中执行固定专案 GPT-6 研究。create_query 返回持久化任务，不代表完成；优先 wait_query(timeout_seconds=25,cursor=上次cursor) 等待变化，完成后 get_query_result(content_format=markdown) 读取 result.content 的累计快照（可能增长或修订，替换旧快照勿盲目拼接），result_is_partial=true 时继续等待，仅 complete=true 为最终交付，但不代表语义质量验收；semantic_validation=not_performed。固定专案指令/记忆可能参与，不能保证上下文隔离。遵循 next_action。health_check 是可选浏览器诊断，失败不等于服务整体不可用，不要高频调用。OUTCOME_UNKNOWN 只用 recover_session/diagnose，切勿换幂等键重发。空间ID只在服务端浏览器实例有效，不要在客户端本机 ego-browser 查找；需要人工处理时把诊断交给维护者。文件和图片用 read_artifact 或 resources/read 获取。", stateless_http=True, json_response=True, transport_security=security)
+    mcp = BridgeMCP(
+        "Ego ChatGPT Bridge",
+        instructions=(
+            LONG_RESEARCH_GUIDANCE
+            + "在橋接服務端的 Ego Browser 固定專案執行 GPT-6 研究。"
+            "get_query_result 回傳累計快照，應替換舊快照。result_is_partial=true 表示中間結果。"
+            "專案指令及記憶可能參與。health_check 是選用診斷。"
+            "OUTCOME_UNKNOWN 請用 recover_session 或 diagnose，避免重送。"
+            "空間 ID 屬於服務端瀏覽器。透過 read_artifact 或 resources/read 取回產物。"
+        ),
+        stateless_http=True,
+        json_response=True,
+        transport_security=security,
+    )
+    mcp._mcp_server.version = version("ego-chatgpt-bridge")
 
     async def call(ctx: Context, name: str, args: dict):
         # Use request state, not a global user/session variable: sessions must not leak ownership.
         owner = ctx.request_context.request.state.owner
         return await service.dispatch(owner, name, args)
 
-    @mcp.tool()
+    @mcp.tool(description=LONG_RESEARCH_GUIDANCE + (
+        "在固定專案新建非同步查詢。request_id 是呼叫方的冪等鍵。"
+        "支援 GPT-6 的 extra_high 與 high。context_mode=request_only_best_effort 可附加範圍約束。"
+    ))
     async def create_query(text: str, request_id: str, ctx: Context, effort: str = "extra_high", model: str = "GPT-6", soft_timeout: float = 600, hard_timeout: float = 3600, context_mode: str = "project") -> dict[str, Any]:
-        """在服务端固定专案新建异步查询，支持长文和多段提示词。返回 Query ID 后用 wait_query 等待变化后 get_query_result 取正文，可先读取 result.content 的增量正文；仅 complete=true 才完成。request_id 是调用方作用域幂等键，超时勿换键重发。浏览器在桥接服务器，本机空间编号无关。只允许 GPT-6 和 extra_high/high。context_mode=request_only_best_effort 会附加仅依据本请求的范围约束，但不能隔离固定专案记忆。"""
         return await call(ctx, "create_query", dict(text=text, request_id=request_id, effort=effort, model=model, soft_timeout=soft_timeout, hard_timeout=hard_timeout, context_mode=context_mode))
 
     @mcp.tool()
@@ -173,7 +190,7 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
     @mcp.tool(structured_output=False)
     async def wait_query(query_id: str, ctx: Context, message_id: str | None = None, cursor: str | None = None,
             timeout_seconds: float = 25, include_content: bool = False, content_format: str = "markdown") -> types.CallToolResult:
-        """等待状态/内容变化，最长30秒，不操作浏览器、不阻塞 worker。传回上次 cursor；changed=false 时不重复正文。默认仅精简状态；需要阶段正文设 include_content=true，收到的是替换快照而非追加 delta。完成后 get_query_result 获取最终内容。"""
+        """等待狀態或內容變化，單次最長 30 秒。請帶回上次 cursor。timed_out=true 只表示這次等待沒有新變化，請依 next_action 繼續等待原任務。generation_done 可能回退，僅 complete=true 後取最終結果。include_content=true 時回傳累計快照。"""
         return result_envelope(await call(ctx,'wait_query',dict(query_id=query_id,message_id=message_id,cursor=cursor,
             timeout_seconds=timeout_seconds,include_content=include_content,content_format=content_format)))
 

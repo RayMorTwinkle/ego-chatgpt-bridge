@@ -2,6 +2,7 @@
 export function readChatPage() {
   const visible=e=>!!e?.getClientRects().length && getComputedStyle(e).visibility!=='hidden';
   const ignored='button,[role="button"],input,textarea,select,svg,[aria-hidden="true"],[hidden],[data-markdown-copy="exclude"],[data-thread-find-skip]';
+  const answerLoadError=/^(?:無法載入這則回覆|无法加载此回复|无法加载这条回复|Unable to load (?:this )?(?:response|message)|Could not load (?:this )?(?:response|message))[。.!]?$/i;
   const block='div,p,h1,h2,h3,h4,h5,h6,li,ul,ol,pre,blockquote,table,tr,section,article';
   function text(node){
     if(!node)return '';
@@ -12,18 +13,66 @@ export function readChatPage() {
     return (copy.textContent??'').replace(/\r\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
   }
   // Serialize only observed answer DOM; no clipboard, hidden application state or API.
+  function codeText(node, lineBreaks=true){
+    const copy=node.cloneNode(true);
+    for(const e of copy.querySelectorAll(ignored))e.remove();
+    if(lineBreaks)for(const br of copy.querySelectorAll('br'))br.replaceWith('\n');
+    return copy.textContent??'';
+  }
+  function widgetCodeSource(node){
+    const source=node.querySelector('[data-code-block-source="true"],pre');
+    if(source&&visible(source))return source;
+    const editor=node.querySelector('.cm-content[data-language]');
+    return visible(editor)&&editor.querySelector(':scope > .cm-line')&&!editor.querySelector('.cm-gap')?editor:null;
+  }
+  function codeFence(raw,minimum){
+    let length=minimum;
+    for(const match of raw.matchAll(/`+/g))length=Math.max(length,match[0].length+1);
+    return '`'.repeat(length);
+  }
   function markdown(node){
     if(node.nodeType===3)return (node.textContent||'').replace(/([\\`*_[\]<>])/g,'\\$1');
     if(node.nodeType!==1||node.matches(ignored))return '';
     const tag=node.tagName.toLowerCase();
     const children=()=>Array.from(node.childNodes).map(markdown).join('');
+    if(node.matches('.katex-display,.katex,math,[data-d-component="math"]')){
+      const display=node.matches('.katex-display,[display="block"],[data-d-block]');
+      let tex=node.querySelector('annotation[encoding="application/x-tex"]')?.textContent?.trim();
+      if(!tex&&node.matches('[data-d-component="math"]')){
+        const raw=node.textContent?.trim()||'';
+        const wrapped=display?/^\\?\[([\s\S]*?)\\?\]$/:/^\\?\(([\s\S]*?)\\?\)$/;
+        tex=(raw.match(wrapped)?.[1]??raw).trim();
+      }
+      if(tex){
+        return display?`\n\n$$\n${tex}\n$$\n\n`:`$${tex}$`;
+      }
+    }
     if(tag==='br')return '\n';
     if(tag==='a'){
       let href;try{href=new URL(node.getAttribute('href'),location.href);}catch{return children();}
       return ['http:','https:'].includes(href.protocol)?`[${children().trim()}](${href.href.replace(/\(/g,'%28').replace(/\)/g,'%29')})`:children();
     }
-    if(tag==='pre'){const raw=node.textContent||'';const fence='`'.repeat(Math.max(3,...Array.from(raw.matchAll(/`+/g),m=>m[0].length+1)));return `\n\n${fence}\n${raw}\n${fence}\n\n`;}
-    if(tag==='code'){const raw=node.textContent||'';const fence='`'.repeat(Math.max(1,...Array.from(raw.matchAll(/`+/g),m=>m[0].length+1)));return `${fence} ${raw} ${fence}`;}
+    if(tag==='pre'||node.matches('[data-code-block="true"]')){
+      const widget=tag!=='pre';
+      const source=widget?widgetCodeSource(node):node;
+      if(!source)return '';
+      const code=source.querySelector('code')||source;
+      const raw=code.matches('.cm-content')?
+        Array.from(code.querySelectorAll(':scope > .cm-line'),line=>codeText(line,false)).join('\n'):
+        codeText(code);
+      const toolbar=widget?node.querySelector(':scope > [data-markdown-copy="exclude"]'):null;
+      const language=code.getAttribute('data-language')||node.getAttribute('data-language')||
+        Array.from(code.classList).find(name=>name.startsWith('language-'))?.slice(9)||
+        (toolbar?codeText(toolbar).trim().toLowerCase():'');
+      const info=/^[\w.+#-]+$/.test(language)?language:'';
+      const fence=codeFence(raw,3);
+      return `\n\n${fence}${info}\n${raw}${raw.endsWith('\n')?'':'\n'}${fence}\n\n`;
+    }
+    if(tag==='code'){
+      const raw=codeText(node);
+      const fence=codeFence(raw,1);
+      return `${fence} ${raw} ${fence}`;
+    }
     if(tag==='table'){
       const rows=Array.from(node.querySelectorAll('tr')).filter(r=>r.closest('table')===node).map(r=>Array.from(r.children).filter(c=>['TH','TD'].includes(c.tagName)).map(c=>markdown(c).trim().replace(/\n+/g,'<br>').replace(/\|/g,'\\|')));
       if(!rows.length)return '';
@@ -36,7 +85,10 @@ export function readChatPage() {
     if(/^h[1-6]$/.test(tag))return '\n\n'+'#'.repeat(Number(tag[1]))+' '+value.trim()+'\n\n';
     if(tag==='strong'||tag==='b')return '**'+value+'**';
     if(tag==='em'||tag==='i')return '*'+value+'*';
-    if(tag==='li')return '\n'+(node.parentElement?.tagName==='OL'?`${Array.from(node.parentElement.children).indexOf(node)+Number(node.parentElement.getAttribute('start')||1)}. `:'- ')+value.trim().replace(/\n/g,'\n  ');
+    if(tag==='li'){
+      const prefix=node.parentElement?.tagName==='OL'?`${Array.from(node.parentElement.children).indexOf(node)+Number(node.parentElement.getAttribute('start')||1)}. `:'- ';
+      return '\n'+prefix+value.trim().replace(/\n/g,'\n'+' '.repeat(prefix.length));
+    }
     if(tag==='blockquote')return '\n\n'+value.trim().split('\n').map(l=>'> '+l).join('\n')+'\n\n';
     if(tag==='hr')return '\n\n---\n\n';
     return /^(p|div|section|article|ul|ol)$/.test(tag)?'\n\n'+value.trim()+'\n\n':value;
@@ -49,7 +101,13 @@ export function readChatPage() {
     // Search/reasoning progress uses the same markdown attribute. Only answer roots
     // count, and nested markdown nodes must not duplicate the enclosing answer.
     const responses=candidates.filter(e=>!candidates.some(parent=>parent!==e&&parent.contains(e)));
-    const answer=responses.map(text).filter(Boolean).join('\n\n');
+    const rawAnswer=responses.map(text).filter(Boolean).join('\n\n');
+    const render_error=answerLoadError.test(rawAnswer)?'ANSWER_LOAD_FAILED':null;
+    const answer=render_error?'':rawAnswer;
+    // A hidden pending marker may remain after hydration. Check for the actual code source.
+    const pendingCode=responses.some(root=>Array.from(root.querySelectorAll('[data-client-defined-widget="code_block"]')).some(
+      widget=>visible(widget)&&!widgetCodeSource(widget)
+    ));
     const selected=responses.map(e=>e.closest('[data-chatgpt-selection-message-id]')||e.querySelector('[data-chatgpt-selection-message-id]')).find(Boolean)||
       Array.from(turn.querySelectorAll('[data-chatgpt-selection-message-id]')).find(e=>!user?.contains(e)&&visible(e)&&!e.closest('[data-markdown-text-tone="tertiary"]'));
     const files=Array.from(turn.querySelectorAll('button[aria-label^="開啟 "][aria-label$=" 預覽"]')).filter(e=>!user?.contains(e)&&visible(e));
@@ -78,17 +136,20 @@ export function readChatPage() {
       plain_text_characters:answer.length,dom_inner_text_characters:responses.reduce((n,e)=>n+(e.innerText||e.textContent||'').length,0),
       table_count:responses.reduce((n,e)=>n+e.querySelectorAll('table').length,0),
       blocks:responses.map((e,index)=>({index,message_id:(e.closest('[data-chatgpt-selection-message-id]')||e.querySelector('[data-chatgpt-selection-message-id]'))?.getAttribute('data-chatgpt-selection-message-id')||null,characters:text(e).length}))};
-    return {assistant_markdown:responses.map(markdown).join('\n\n').replace(/\n{3,}/g,'\n\n').trim(),extraction,generation_active,state:turn.getAttribute('data-talvt-turn-state'),user_id:user?.getAttribute('data-chatgpt-search-message-ids')??null,
+    return {assistant_markdown:render_error?'':responses.map(markdown).join('\n\n').trim(),extraction,generation_active,render_error,state:turn.getAttribute('data-talvt-turn-state'),user_id:user?.getAttribute('data-chatgpt-search-message-ids')??null,
       user_text:text(user?.querySelector('[data-search-result-target]')||user),assistant_id:selected?.getAttribute('data-chatgpt-selection-message-id')??null,
-      assistant_text:answer,sources,external_images,render_ready:!!(answer||native_images.some(i=>i.complete&&i.naturalWidth>0)||external_images.length||unsupported_outputs.length)&&native_images.every(i=>i.complete&&i.naturalWidth>0),
+      assistant_text:answer,sources,external_images,render_ready:!render_error&&!pendingCode&&!!(answer||native_images.some(i=>i.complete&&i.naturalWidth>0)||external_images.length||unsupported_outputs.length)&&native_images.every(i=>i.complete&&i.naturalWidth>0),
       artifacts,unsupported_outputs,regenerate:!!turn.querySelector('button[aria-label="重新產生回覆"]'),
-      reader_diagnostics:{version:3,progress_images_ignored,answer_roots:responses.length,reasoning_nodes_excluded:all.filter(e=>e.closest('[data-markdown-text-tone="tertiary"]')).length,user_controls_excluded:user?.querySelectorAll(ignored).length??0}};
+      reader_diagnostics:{version:4,pending_code:pendingCode,progress_images_ignored,answer_roots:responses.length,reasoning_nodes_excluded:all.filter(e=>e.closest('[data-markdown-text-tone="tertiary"]')).length,user_controls_excluded:user?.querySelectorAll(ignored).length??0}};
   });
   const editor=document.querySelector('form [contenteditable="true"]');
   return {url:location.href,title:document.title,turns,editor_present:visible(editor),draft:text(editor),draft_has_autolinks:!!editor?.querySelector('[data-rich-text-generated-autolink]'),
     model_label:document.querySelector('button[aria-label="選取 ChatGPT 模型"]')?.innerText,
     buttons:Array.from(document.querySelectorAll('form button')).filter(visible).map(b=>({label:b.getAttribute('aria-label'),disabled:b.disabled})),
-    dialogs:Array.from(document.querySelectorAll('[role="dialog"],[role="alertdialog"]')).filter(visible).map(e=>e.innerText.slice(0,800)),
+    dialogs:Array.from(document.querySelectorAll('[role="dialog"],[role="alertdialog"]')).filter(e=>visible(e)&&!(
+      e.matches('[role="dialog"][data-slot="popover-content"]:not([aria-modal="true"])')&&
+      e.querySelector('[data-summary-panel-variant="dynamic-isle"]')
+    )).map(e=>e.innerText.slice(0,800)),
     alerts:Array.from(document.querySelectorAll('[role="alert"]')).filter(visible).map(e=>e.innerText.slice(0,800)),
     login:!editor&&Array.from(document.querySelectorAll('button,a')).filter(visible).some(e=>/^(登入|登录|Log in|Sign in)$/.test(e.innerText.trim())),
     breadcrumb:Array.from(document.querySelectorAll('a[href]')).some(a=>a.getAttribute('href')?.endsWith('/project')&&visible(a))};

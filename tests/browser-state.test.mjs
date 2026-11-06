@@ -7,6 +7,8 @@ function fixture(content,state='in_progress'){
   const {window}=parseHTML(`<html><head><title>Fixture</title></head><body><div data-talvt-turn-state="${state}">${content}</div><form><div contenteditable="true"></div><button aria-label="選取 ChatGPT 模型">極高</button></form></body></html>`);
   window.HTMLElement.prototype.getClientRects=function(){for(let e=this;e;e=e.parentElement)if(e.hidden||e.style?.display==='none')return [];return [{}];};
   window.HTMLElement.prototype.getBoundingClientRect=function(){return {width:this.tagName==='SVG'?20:128,height:this.tagName==='SVG'?20:128};};
+  window.SVGElement.prototype.getClientRects=window.HTMLElement.prototype.getClientRects;
+  window.SVGElement.prototype.getBoundingClientRect=()=>({width:20,height:20});
   globalThis.document=window.document;
   globalThis.location={href:'https://chatgpt.com/g/g-p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff'};
   globalThis.getComputedStyle=e=>({visibility:e.style.visibility||'visible'});
@@ -101,4 +103,68 @@ test('rich-link editor chrome does not add whitespace to exact submitted prompt'
   editor.innerHTML='<p>Read [Official](<span data-rich-text-generated-autolink><span aria-hidden="true" contenteditable="false">icon</span>https://example.org/</span>) now.</p><p>Second paragraph</p>';
   Object.defineProperty(editor,'innerText',{value:'Read [Official](\nhttps://example.org/) now.\nSecond paragraph'});
   assert.equal(readChatPage().draft,'Read [Official](https://example.org/) now.\n\nSecond paragraph');
+});
+
+test('KaTeX emits one TeX expression for each inline and display formula',()=>{
+  const math=String.raw`<span class="katex"><span class="katex-mathml"><math><semantics><mrow>βj</mrow><annotation encoding="application/x-tex">\beta_j</annotation></semantics></math></span><span class="katex-html" aria-hidden="true">βj</span></span>`;
+  fixture(user()+`<div data-markdown-text-style="assistant-message"><p>Estimate ${math} here.</p><span class="katex-display">${math}</span></div>`);
+  const md=readChatPage().turns[0].assistant_markdown;
+  assert.ok(md.includes(String.raw`Estimate $\beta_j$ here.`));
+  assert.ok(md.includes('$$\n'+String.raw`\beta_j`+'\n$$'));
+  assert.doesNotMatch(md,/βj/);
+});
+
+test('Markdown code keeps its language, blank lines, literal backticks and code-only text',()=>{
+  fixture(user()+'<div data-markdown-text-style="assistant-message"><pre><button>Copy</button><code class="language-python">def f():\n\n\n    return "```"\n</code></pre></div>');
+  const md=readChatPage().turns[0].assistant_markdown;
+  assert.equal(md,'````python\ndef f():\n\n\n    return "```"\n````');
+});
+
+test('known answer-load placeholder cannot make an attached file turn render-ready',()=>{
+  fixture(user()+'<div data-markdown-text-style="assistant-message">無法載入這則回覆</div><button aria-label="開啟 report.csv 預覽">report.csv</button>','complete');
+  const turn=readChatPage().turns[0];
+  assert.equal(turn.render_error,'ANSWER_LOAD_FAILED');
+  assert.equal(turn.render_ready,false);
+  assert.equal(turn.assistant_text,'');
+});
+
+test('the known output popover is nonblocking while actual dialogs remain guarded',()=>{
+  fixture(user()+body());
+  document.body.insertAdjacentHTML('beforeend','<div role="dialog" data-slot="popover-content"><div data-summary-panel-variant="dynamic-isle">輸出內容</div></div><div role="dialog" aria-modal="true" data-slot="popover-content"><div data-summary-panel-variant="dynamic-isle">Confirm</div></div>');
+  assert.deepEqual(readChatPage().dialogs,['Confirm']);
+});
+
+test('hydrated response math and native code widgets preserve their rendered source',()=>{
+  fixture(user()+String.raw`<div data-markdown-text-style="assistant-message">
+    <p>Estimate <span data-d-component="math">(\beta_j)</span>.</p>
+    <div data-d-block data-d-component="math"><p>[Y_{ij}=\mu+\beta_j]</p></div>
+    <div data-client-defined-widget="code_block"><span hidden data-code-block-pending="true"></span>
+      <div data-code-block="true" data-markdown-copy="code-block">
+        <div data-markdown-copy="exclude"><svg></svg><div>Python</div><button>Copy</button></div>
+        <div data-code-block-source="true"><code><span>x = 1
+
+
+print(x)</span></code></div>
+      </div>
+    </div>
+  </div>`,'complete');
+  const md=readChatPage().turns[0].assistant_markdown;
+  assert.ok(md.includes(String.raw`Estimate $\beta_j$.`));
+  assert.ok(md.includes('$$\n'+String.raw`Y_{ij}=\mu+\beta_j`+'\n$$'));
+  assert.ok(md.includes('```python\nx = 1\n\n\nprint(x)\n```'));
+  assert.doesNotMatch(md,/Copy/);
+});
+
+test('code widget must hydrate before the turn is ready for completion',()=>{
+  fixture(user()+'<div data-markdown-text-style="assistant-message"><p>Code follows</p><div data-client-defined-widget="code_block"><span data-code-block-pending="true" hidden></span></div></div>','complete');
+  assert.equal(readChatPage().turns[0].render_ready,false);
+  document.querySelector('[data-client-defined-widget="code_block"]').insertAdjacentHTML('beforeend','<div data-code-block="true"><div data-code-block-source="true"><code>x = 1</code></div></div>');
+  assert.equal(readChatPage().turns[0].render_ready,true);
+});
+
+test('live CodeMirror widgets preserve language and every editor line',()=>{
+  fixture(user()+'<div data-markdown-text-style="assistant-message"><div data-client-defined-widget="code_block"><div data-code-block="true"><div data-markdown-copy="exclude"><button>Run</button></div><div class="cm-content" data-language="python"><div class="cm-line"><span>s</span> = 4</div><div class="cm-line"><br></div><div class="cm-line"><br></div><div class="cm-line">print(s)</div></div></div></div></div>','complete');
+  const turn=readChatPage().turns[0];
+  assert.equal(turn.render_ready,true);
+  assert.equal(turn.assistant_markdown,'```python\ns = 4\n\n\nprint(s)\n```');
 });

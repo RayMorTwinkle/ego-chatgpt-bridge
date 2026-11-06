@@ -1,3 +1,5 @@
+from importlib.metadata import version
+
 import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -33,14 +35,20 @@ async def test_real_sdk_handshake_tools_and_owner_context(tmp_path):
             async with streamable_http_client('https://localhost/mcp',http_client=http) as (read,write,_):
                 async with ClientSession(read,write) as session:
                     initialization=await session.initialize()
-                    assert 'result_is_partial' in initialization.instructions and '服务端' in initialization.instructions
-                    names={t.name for t in (await session.list_tools()).tools}
-                    assert {'create_query','continue_query','get_query_status','get_query_result','list_queries','health_check','diagnose'}<=names
+                    assert 'result_is_partial' in initialization.instructions and '服務端' in initialization.instructions
+                    assert initialization.serverInfo.version == version("ego-chatgpt-bridge")
+                    catalog={t.name:t.description for t in (await session.list_tools()).tools}
+                    assert {'create_query','continue_query','get_query_status','get_query_result','list_queries','health_check','diagnose','wait_query'}<=catalog.keys()
                     result=await session.call_tool('list_queries',{})
                     assert not result.isError
                     assert result.structuredContent['ok']
                     assert result.structuredContent['queries']==[]
                     created=(await session.call_tool('create_query',{'text':'test','request_id':'sdk-wait'})).structuredContent
+                    assert created['accepted'] and created['next_action']['tool']=='wait_query'
+                    for phrase in ('10 分鐘以上','wait_query','請勿重送','complete=true'):
+                        assert all(phrase in channel for channel in (
+                            initialization.instructions, catalog['create_query'], created['waiting_guidance'],
+                        ))
                     waited=await session.call_tool('wait_query',{'query_id':created['query_id'],'timeout_seconds':0})
                     assert not waited.isError and waited.structuredContent['changed']
                     assert 'result' not in waited.structuredContent

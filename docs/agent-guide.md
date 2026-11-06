@@ -6,7 +6,7 @@
 
 1. 可先用廉价的 `diagnose` 查看服务/worker。`health_check` 是可选的浏览器控件诊断，可能较慢；失败不意味着服务整体不可用，不要反复调用。每次发送前仍会独立核验账户、专案与模型。
 2. `create_query(text, request_id)` 返回 Query ID 和消息操作 ID；请求接受不等于生成完成。
-3. 优先 `wait_query(timeout_seconds=25, cursor=上次cursor)` 等待变化，完成后 `get_query_result` 取正文，同时保存 Query ID 与消息操作 ID。`result.content` 是截至最近观察的累计快照，可能增长或被网页修订；更新时替换旧快照，不要盲目拼接。`result_is_partial=true` 表示可先读取但仍需等待，不能因为暂时为空就创建第二份请求；遵循 `next_action`。
+3. 單次研究可能需要 10 分鐘以上。保存 Query ID 與消息操作 ID，優先用 `wait_query(timeout_seconds=25, cursor=上次cursor)` 等待。單次等待逾時或暫無正文時，依 `next_action` 繼續原任務。完成後用 `get_query_result` 取得最終結果。中間正文是累計快照，應替換舊快照。`generation_done` 是可能回退的網頁訊號，最終交付以 `complete=true` 為準。
 4. `complete=true` 才表示这一轮的生成及交付均完成。`generation_complete=true` 时正文已生成，文件未齐也可以先使用正文。`generation_complete=true`、`delivery_complete=false` 时使用 `collect_artifacts`，不要重新提问。
 5. 用原 Query ID 调用 `continue_query` 保留上下文，每轮使用新的 request_id。
 

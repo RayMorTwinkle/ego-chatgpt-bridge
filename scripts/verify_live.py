@@ -45,10 +45,10 @@ async def main():
             async with ClientSession(read,write) as session:
                 await session.initialize()
                 tools=await session.list_tools()
-                assert len(tools.tools)==17
+                assert 'wait_query' in {tool.name for tool in tools.tools}
                 result=await session.call_tool('list_queries',{})
                 assert result.structuredContent['ok']
-                report['checks'].append('Real MCP SDK initialize, 17 tool schemas, tools/call with structured output')
+                report['checks'].append(f'Real MCP SDK initialize, {len(tools.tools)} tool schemas, tools/call with structured output')
         stamp=str(time.time_ns())
         requests=[dict(text=f'EGO_LIVE_{stamp}_{n}: 这是桥接服务集成测试。请只回复 LIVE_OK_{n}。',request_id=f'live-{stamp}-{n}') for n in (1,2)]
         tasks=await asyncio.gather(*(api('create_query',r) for r in requests))

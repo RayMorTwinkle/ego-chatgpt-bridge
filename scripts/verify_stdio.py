@@ -14,9 +14,12 @@ async def main():
     params=StdioServerParameters(command=str(DEFAULT_RUNTIME/'.venv/bin/ego-bridge'),args=['--runtime',str(DEFAULT_RUNTIME),'stdio'])
     async with stdio_client(params) as (read,write):
         async with ClientSession(read,write) as session:
-            await session.initialize()
+            initialized = await session.initialize()
             tools=await session.list_tools()
-            assert len(tools.tools)==17
+            descriptions = {tool.name: tool.description for tool in tools.tools}
+            assert 'wait_query' in descriptions
+            assert '10 分鐘以上' in initialized.instructions
+            assert '10 分鐘以上' in descriptions['create_query']
             result=await session.call_tool('diagnose',{})
             assert result.structuredContent['ok']
             target=DEFAULT_RUNTIME/'verification/stdio-verification.json'

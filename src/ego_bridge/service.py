@@ -12,6 +12,20 @@ from .store import Store
 from .artifacts import Artifacts
 
 
+LONG_RESEARCH_GUIDANCE = (
+    "【長程研究工具】單次任務可能需要 10 分鐘以上。create_query 僅表示任務已受理。"
+    "請保留 query_id 和 message_id，使用 wait_query 持續等待並帶回上次 cursor。"
+    "單次等待逾時或暫無正文不代表任務失敗，請勿重送。依 next_action 處理，"
+    "僅在 complete=true 後取得最終交付，並另外驗收內容品質。generation_done 只是可能回退的網頁訊號。"
+)
+
+ANSWER_LOAD_ERROR = re.compile(
+    r"^(?:無法載入這則回覆|无法加载此回复|无法加载这条回复|"
+    r"Unable to load (?:this )?(?:response|message)|Could not load (?:this )?(?:response|message))[。.!]?$",
+    re.IGNORECASE,
+)
+
+
 def normalize(text: str) -> str:
     return " ".join(text.split())
 
@@ -62,7 +76,7 @@ class Service:
     def result_cursor(op, artifacts):
         result=op.get('result') or {}
         value={'message_id':op['id'],'status':op['status'],'error':op['error'],
-            'result':{key:result.get(key) for key in ('content','markdown','sources','external_images','completeness_signal','extraction_stable','generation_done','delivery_phase')},
+            'result':{key:result.get(key) for key in ('content','markdown','sources','external_images','completeness_signal','extraction_stable','generation_done','render_error','delivery_phase')},
             'artifacts':artifacts}
         return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
 
@@ -88,7 +102,7 @@ class Service:
         state=op['status'];error=op.get('error') or {}
         if state in {'QUEUED','PREPARING','SUBMITTING','WAITING_FOR_RESPONSE','GENERATING'}:
             return {'tool':'wait_query','arguments':{**args,'timeout_seconds':25},'wait_seconds':0,'do_not_resend':True,
-                'note':'回答可能分段增长；complete=false 时继续等待，已有 result.content 可读但不是最终结果。'}
+                'note':'任務可能超過 10 分鐘。單次等待逾時或暫無正文時，保留原 ID 繼續等待，請勿重送。只有 complete=true 表示最終交付。若連接器尚無 wait_query，請用 get_query_result 查詢同一任務。'}
         if state=='OUTCOME_UNKNOWN' or state=='NEEDS_ATTENTION' and op['submitted_at'] is not None:
             tool='collect_artifacts' if error.get('error_code')=='ARTIFACT_CAPTURE_FAILED' else 'recover_session'
             return {'tool':tool,'arguments':args,'do_not_resend':True,
@@ -157,7 +171,7 @@ class Service:
             if context_mode!='project':payload['context_mode']=context_mode
             op = self.store.enqueue(owner, request, payload, self.settings.project_id, self.settings.space_id, qid)
             self.wake.set()
-            return {"ok": True, **self.view(op)}
+            return {"ok": True, "accepted": True, "waiting_guidance": LONG_RESEARCH_GUIDANCE, **self.view(op)}
         if tool == "list_queries":
             limit, offset = args.get("limit", 20), args.get("offset", 0)
             if not isinstance(limit, int) or not 1 <= limit <= 100 or not isinstance(offset, int) or offset < 0:
@@ -183,13 +197,19 @@ class Service:
         if tool == "get_query_result":
             result = dict(op["result"] or {})
             result.pop("history", None)
+            legacy_load_error = op["status"] == "COMPLETED" and ANSWER_LOAD_ERROR.fullmatch(result.get("content", "").strip())
+            if legacy_load_error:
+                result.update(content="", markdown="", completeness_signal="pending_render",
+                              extraction_stable=False, render_error="ANSWER_LOAD_FAILED")
+                for key in ("completion_confirmation", "content_sha256"):
+                    result.pop(key, None)
             confirmation=result.get("completion_confirmation")
             if confirmation:result["completion_confirmation"]={k:v for k,v in confirmation.items() if k!="signature"}
             if op['result'] is not None:
                 result['artifacts']=self.artifacts.list(owner,op['id'])
                 if 'outputs' in result:
                     result['outputs']=self.outputs(result)
-            generation_complete=bool(op['result'] and op['result'].get('completeness_signal')=='complete')
+            generation_complete=bool(not legacy_load_error and op['result'] and op['result'].get('completeness_signal')=='complete')
             delivery_complete=bool(generation_complete and result.get('delivery_complete',True) and all(a['status']=='AVAILABLE' for a in result.get('artifacts',[])))
             if op["result"] is not None:
                 result["delivery_complete"]=delivery_complete
@@ -201,6 +221,11 @@ class Service:
                     "complete":op["status"]=="COMPLETED" and delivery_complete,
                     "result_is_partial":bool(op["result"] and not generation_complete),
                     "cursor":self.result_cursor(op,result.get('artifacts',[]))}
+            if legacy_load_error:
+                output.update(
+                    last_error=BridgeError("ANSWER_LOAD_FAILED", "歷史紀錄只保存了網頁載入錯誤，未能驗證最終正文。", stage="observe").data,
+                    next_action={"tool":"diagnose","arguments":{"query_id":qid,"message_id":op["id"]},"do_not_resend":True},
+                )
             if output.get('next_action',{} ) and output['next_action']['tool']=='wait_query':
                 output['next_action']['arguments']['cursor']=output['cursor']
             if args.get('compact',False):
@@ -413,7 +438,12 @@ class Service:
                 if not effort_ok or re.search(r"5\.6|\bPro\b",label):
                     raise BridgeError("MODEL_SELECTION_CHANGED", "网页当前模型／思考选择发生变化，无法继续确认所请求配置。",stage="observe",action=True)
             self.last_verified_page={'page_label':response['page_label'],'at':now()}
-            ready=bool(state=='complete' and turn.get('render_ready',True) and not turn.get('generation_active',False)
+            last_result=op.get("result") or {}
+            render_error=turn.get("render_error")
+            if state=="complete" and not turn["assistant_text"] and last_result.get("content"):
+                # A file card can outlive the hydrated answer. Retain the known text as a partial snapshot.
+                render_error=render_error or "ANSWER_NOT_RENDERED"
+            ready=bool(state=='complete' and not render_error and turn.get('render_ready',True) and not turn.get('generation_active',False)
                 and (turn['assistant_text'] or turn.get('artifacts') or turn.get('external_images') or turn.get('unsupported_outputs'))
                 and (turn.get('regenerate') or turn.get('artifacts') or turn.get('external_images') or turn.get('unsupported_outputs')))
             signature=hashlib.sha256(json.dumps({k:turn.get(k) for k in ('assistant_text','assistant_markdown','assistant_id','sources','artifacts','external_images','unsupported_outputs')},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
@@ -431,6 +461,11 @@ class Service:
                           user_message_id=turn.get("user_id"), assistant_message_id=turn.get("assistant_id"),
                           history=history(turns), observed=op["observed"], completeness_signal='complete' if stable else 'confirming' if ready else state if state!='complete' else 'pending_render',
                           warning="模型与思考等级仅通过网页选择器核验，未验证推理后端。")
+            if render_error:
+                result["render_error"]=render_error
+                for key in ("content", "markdown", "sources", "external_images", "extraction", "content_sha256"):
+                    if key in last_result:
+                        result[key]=last_result[key]
             if stable:
                 result=await self.package_result(op,turn,result)
                 self.store.transition(op["id"], "COMPLETED" if result['delivery_complete'] else 'NEEDS_ATTENTION', result=result,
@@ -449,7 +484,8 @@ class Service:
                 self.store.transition(op["id"], "CANCELLED" if cancelled else "NEEDS_ATTENTION", result=result,
                                       error=None if cancelled else BridgeError("RESPONSE_INTERRUPTED", "网页回答被中断或出错。", action=True).data)
             elif now() - op["submitted_at"] > op["payload"]["hard_timeout"]:
-                self.store.transition(op["id"], "NEEDS_ATTENTION", result=result, error=BridgeError("GENERATION_TIMEOUT", "超过硬超时；网页可能仍在执行，可对账恢复。", action=True).data)
+                error=BridgeError(render_error, "網頁正文無法讀取。已保留可用的中間內容，可對帳恢復。", stage="observe", action=True) if render_error else BridgeError("GENERATION_TIMEOUT", "超过硬超时；网页可能仍在执行，可对账恢复。", action=True)
+                self.store.transition(op["id"], "NEEDS_ATTENTION", result=result, error=error.data)
             else:
                 target = "GENERATING" if state not in {"pending", "queued", "waiting"} else "WAITING_FOR_RESPONSE"
                 # Do not regress GENERATING to WAITING on transient UI states.

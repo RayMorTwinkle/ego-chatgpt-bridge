@@ -2,7 +2,7 @@
 
 MCP `/mcp`、HTTP `POST /api/<tool>`、CLI 和 stdio 共用同一 Service。网络入口默认使用 EasyTier 内 HTTP、Bearer token、Host 白名单和来源 CIDR；TLS 可选。WebUI 使用同一个身份 token 登录后签发的一年 cookie；普通 MCP／HTTP API 不接受 WebUI cookie 替代 Bearer。
 
-## 17 个 MCP 工具
+## MCP 工具
 
 | 工具 | 必填参数 | 行为 |
 | --- | --- | --- |
@@ -10,6 +10,7 @@ MCP `/mcp`、HTTP `POST /api/<tool>`、CLI 和 stdio 共用同一 Service。网�
 | continue_query | query_id、text、request_id | 同一会话按序追加 |
 | get_query_status | query_id | 可选 message_id；状态、错误、阻塞前序 |
 | get_query_result | query_id | 可选 message_id；文字、链接、产物及交付完整性 |
+| wait_query | query_id | 可選 message_id、cursor、timeout_seconds（0–30）；等候狀態變化 |
 | list_queries | 无 | status、limit=1..100、offset；身份隔离 |
 | health_check | 无 | 实际检查浏览器、空间、账户显示名、專案和模型控件 |
 | diagnose | 无 | 可选 query_id/message_id，返回结构化诊断 |
@@ -27,6 +28,8 @@ MCP `/mcp`、HTTP `POST /api/<tool>`、CLI 和 stdio 共用同一 Service。网�
 text 为 1..100000 字符，request_id 为 1..200 字符。默认 soft_timeout=600、hard_timeout=3600 秒，需 `1 <= soft <= hard <= 86400`。每身份最多 100 条等待消息，请求体上限 1 MiB。
 
 Query ID 对应一个 Conversation；Message ID 对应一次输入／响应。幂等键属于调用方：同键同参数复用原操作，异参冲突。发送文本带内部请求标记以便页面对账，这不是网页服务端提供的幂等键。
+
+`create_query` 回傳 `accepted=true`、任務識別碼與 `waiting_guidance`。單次任務可能需要 10 分鐘以上。帶回 `wait_query` 回傳的 cursor 繼續等候原任務，單次等候的 `timed_out=true` 表示沒有新變化。 `generation_done` 可能隨網頁狀態回退，請以 `complete=true` 判定交付，再驗收內容品質。
 
 ## 结果
 

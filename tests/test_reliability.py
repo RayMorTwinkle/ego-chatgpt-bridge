@@ -472,3 +472,50 @@ async def test_health_timeout_is_page_scoped_but_login_failure_still_needs_opera
     fake.call=login
     r=await s.dispatch('alice','health_check',{})
     assert r['error']['user_action_required']
+
+
+async def test_answer_load_error_keeps_partial_and_requires_new_confirmation(rig, monkeypatch):
+    s, db, fake = rig
+    s.settings.completion_confirm_seconds = 4
+    clock = [1000.0]
+    monkeypatch.setattr('ego_bridge.service.now', lambda: clock[0])
+    task = await create(s)
+    await execute(s, db, task)
+    mid = task['message_id']
+    args = {'query_id': task['query_id']}
+    turn = fake.pages['p1'][0]
+    turn.update(state='complete', assistant_text='The rendered answer')
+    await s.observe(db.operation(mid))
+    turn.update(assistant_text='', render_error='ANSWER_LOAD_FAILED', render_ready=False,
+                artifacts=[{'kind': 'file_card', 'name': 'report.csv', 'index': 0}])
+    clock[0] += 5
+    await s.observe(db.operation(mid))
+    clock[0] += 5
+    await s.observe(db.operation(mid))
+    result = await s.dispatch('alice', 'get_query_result', args)
+    assert result['generation_done'] and not result['complete']
+    assert result['result_is_partial'] and result['result']['content'] == 'The rendered answer'
+    assert result['result']['render_error'] == 'ANSWER_LOAD_FAILED'
+    assert result['result']['artifacts'] == []
+    turn.update(assistant_text='The rendered answer', render_error=None, render_ready=True, artifacts=[])
+    clock[0] += 5
+    await s.observe(db.operation(mid))
+    assert not (await s.dispatch('alice', 'get_query_result', args))['complete']
+    clock[0] += 5
+    await s.observe(db.operation(mid))
+    assert (await s.dispatch('alice', 'get_query_result', args))['complete']
+    assert len(fake.sent) == 1
+
+
+async def test_historical_load_error_result_is_not_served_as_complete(rig):
+    s, db, fake = rig
+    task = await create(s)
+    await execute(s, db, task)
+    db.transition(task['message_id'], 'COMPLETED', result={
+        'content': '無法載入這則回覆', 'markdown': '無法載入這則回覆',
+        'completeness_signal': 'complete', 'extraction_stable': True,
+    })
+    result = await s.dispatch('alice', 'get_query_result', {'query_id': task['query_id']})
+    assert not result['complete'] and not result['generation_complete']
+    assert result['result']['content'] == ''
+    assert result['last_error']['error_code'] == 'ANSWER_LOAD_FAILED'

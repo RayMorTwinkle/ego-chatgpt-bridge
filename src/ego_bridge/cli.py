@@ -76,8 +76,9 @@ async def stdio_proxy(settings, owner):
     async with httpx.AsyncClient(verify=ssl_context, headers={"Authorization": f"Bearer {token}"}, timeout=90,trust_env=False) as http:
         async with streamable_http_client(settings.base_url + "/mcp", http_client=http) as (read, write, _):
             async with ClientSession(read, write) as remote:
-                await remote.initialize()
-                proxy = Server("ego-bridge-stdio-proxy")
+                initialized = await remote.initialize()
+                proxy = Server("ego-bridge-stdio-proxy", version=initialized.serverInfo.version,
+                               instructions=initialized.instructions)
                 @proxy.list_tools()
                 async def tools():
                     return (await remote.list_tools()).tools
