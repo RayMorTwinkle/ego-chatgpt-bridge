@@ -6,6 +6,7 @@ import os
 import plistlib
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from .model import BridgeError
@@ -26,7 +27,12 @@ def manage_autostart(runtime: Path,action: str):
     if sys.platform!='darwin':raise SystemExit('Autostart currently supports macOS launchd only.')
     target=Path.home()/'Library/LaunchAgents'/f'{LABEL}.plist';domain=f'gui/{os.getuid()}';job=domain+'/'+LABEL
     def launch(*args,check=False):
+        deadline=time.monotonic()+30
         result=subprocess.run(['/bin/launchctl',*args],capture_output=True,text=True)
+        # launchd can finish removing the old job after bootout has returned.
+        while args[0]=='bootstrap' and 'Bootstrap failed: 5:' in result.stderr and result.returncode and time.monotonic()<deadline:
+            time.sleep(.2)
+            result=subprocess.run(['/bin/launchctl',*args],capture_output=True,text=True)
         if check and result.returncode:
             raise BridgeError('LAUNCHD_ACTION_FAILED',result.stderr.strip()[:1000] or 'launchctl 操作失败。',context={'action':args[0],'exit_code':result.returncode})
         return result

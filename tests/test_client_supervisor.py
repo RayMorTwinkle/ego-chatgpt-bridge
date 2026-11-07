@@ -3,6 +3,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -38,6 +39,64 @@ def test_launch_config_uses_runtime_without_tokens_and_keeps_job_alive(tmp_path)
     assert config['ProgramArguments'][-1]=='supervise'
     assert not any('TOKEN' in k for k in config['EnvironmentVariables'])
     assert network_ready('127.0.0.1') and not network_ready('192.0.2.199')
+
+
+@pytest.mark.parametrize('bootstrap_error,transient', [
+    ('Bootstrap failed: 5: Input/output error', True),
+    ('Bootstrap failed: 37: Operation already in progress', False),
+])
+def test_autostart_install_retries_pending_launchd_teardown_only(tmp_path, monkeypatch, bootstrap_error, transient):
+    import ego_bridge.autostart as autostart
+
+    runtime = tmp_path/'runtime'
+    python = runtime/'.venv/bin/python'
+    python.parent.mkdir(parents=True)
+    python.touch()
+    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(autostart.sys, 'platform', 'darwin')
+    clock = [0.0]
+    monkeypatch.setattr(autostart, 'time', SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0]+seconds)), raising=False)
+    attempts = []
+
+    def run(command, **kwargs):
+        if command[1] == 'bootstrap':
+            attempts.append(command)
+            if len(attempts) == 1:
+                return SimpleNamespace(returncode=5, stderr=bootstrap_error)
+        return SimpleNamespace(returncode=0, stderr='')
+
+    monkeypatch.setattr(autostart.subprocess, 'run', run)
+    if transient:
+        autostart.manage_autostart(runtime, 'install')
+        assert len(attempts) == 2 and clock[0] > 0
+    else:
+        with pytest.raises(BridgeError, match='Operation already in progress'):
+            autostart.manage_autostart(runtime, 'install')
+        assert len(attempts) == 1
+
+
+def test_autostart_install_bootstrap_retry_is_bounded(tmp_path, monkeypatch):
+    import ego_bridge.autostart as autostart
+
+    runtime = tmp_path/'runtime'
+    python = runtime/'.venv/bin/python'
+    python.parent.mkdir(parents=True)
+    python.touch()
+    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(autostart.sys, 'platform', 'darwin')
+    clock = [0.0]
+    monkeypatch.setattr(autostart, 'time', SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0]+seconds)), raising=False)
+
+    def run(command, **kwargs):
+        return SimpleNamespace(returncode=5 if command[1] == 'bootstrap' else 0,
+                               stderr='Bootstrap failed: 5: Input/output error')
+
+    monkeypatch.setattr(autostart.subprocess, 'run', run)
+    with pytest.raises(BridgeError, match='Input/output error'):
+        autostart.manage_autostart(runtime, 'install')
+    assert 0 < clock[0] <= 31
 
 
 def test_same_named_space_is_exclusive_across_runtime_dirs_and_rebinding_is_audited(tmp_path,monkeypatch):
