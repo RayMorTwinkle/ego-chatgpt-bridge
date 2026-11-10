@@ -1,4 +1,7 @@
+import asyncio
+import base64
 import copy
+from pathlib import Path
 
 import pytest
 
@@ -210,6 +213,74 @@ async def test_restart_at_submission_boundary_does_not_enqueue(rig):
     assert db.operation(a["message_id"])["status"] == "OUTCOME_UNKNOWN"
     assert fake.sent == []
     assert not db.candidates()
+
+
+async def test_attention_and_unknown_submissions_do_not_starve_the_queue(rig):
+    service, store, browser = rig
+    for request_id, status in [('timed-out', 'NEEDS_ATTENTION'), ('unconfirmed', 'OUTCOME_UNKNOWN')]:
+        task = await create(service, request_id=request_id)
+        store.transition(task['message_id'], 'PREPARING')
+        store.transition(task['message_id'], 'SUBMITTING')
+        store.transition(task['message_id'], status)
+    pending = await create(service, request_id='next')
+    executed = asyncio.Event()
+    original = browser.call
+
+    async def signal_submission(action, **kwargs):
+        result = await original(action, **kwargs)
+        if action == 'submit':
+            executed.set()
+        return result
+
+    browser.call = signal_submission
+    await service.start()
+    try:
+        await asyncio.wait_for(executed.wait(), timeout=.5)
+        assert len(browser.sent) == 1 and pending['message_id'] in browser.sent[0]
+    finally:
+        await service.stop()
+
+
+async def test_attachment_bytes_are_staged_for_prepare_and_released_at_submit(rig):
+    service, store, browser = rig
+    data = b'attachment content\n'
+    files = [{'filename': 'report.txt', 'content_base64': base64.b64encode(data).decode()}]
+    queued = await create(service, attachments=files)
+    op_id = queued['message_id']
+    assert queued['attachments'][0]['size_bytes'] == len(data)
+    assert 'content_base64' not in str(queued)
+    assert store.uploads(op_id) == {'report.txt': data}
+    assert (await create(service, attachments=files))['message_id'] == op_id
+    changed = await service.dispatch('alice', 'create_query', {'request_id': 'r1', 'text': 'Question',
+        'attachments': [{'filename': 'report.txt', 'content_base64': 'YQ=='}]})
+    assert changed['error']['error_code'] == 'IDEMPOTENCY_CONFLICT'
+    original = browser.call
+    staged = []
+
+    async def inspect_upload(action, **kwargs):
+        if action == 'prepare':
+            staged.append(Path(kwargs['attachment_paths'][0]))
+            assert staged[0].name == 'report.txt' and staged[0].read_bytes() == data
+        if action == 'submit':
+            assert kwargs['attachment_names'] == ['report.txt']
+            assert not staged[0].exists() and not store.uploads(op_id)
+        return await original(action, **kwargs)
+
+    browser.call = inspect_upload
+    await execute(service, store, queued)
+    assert len(browser.sent) == 1
+
+
+@pytest.mark.parametrize('filename,content,code', [
+    ('../../secret', 'YQ==', 'INVALID_ATTACHMENT_NAME'),
+    ('report.txt', '?', 'INVALID_ATTACHMENT_CONTENT'),
+    ('report.txt', '', 'ATTACHMENT_SIZE_LIMIT'),
+])
+async def test_invalid_upload_does_not_enqueue(rig, filename, content, code):
+    service, store, _ = rig
+    result = await service.dispatch('alice', 'create_query', {'request_id': 'bad-upload', 'text': 'Question',
+        'attachments': [{'filename': filename, 'content_base64': content}]})
+    assert result['error']['error_code'] == code and not store.candidates()
 
 
 async def test_partial_and_unknown_completion_never_complete(rig):

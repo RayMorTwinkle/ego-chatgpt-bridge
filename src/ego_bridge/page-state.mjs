@@ -3,6 +3,7 @@ export function readChatPage() {
   const visible=e=>!!e?.getClientRects().length && getComputedStyle(e).visibility!=='hidden';
   const ignored='button,[role="button"],input,textarea,select,svg,[aria-hidden="true"],[hidden],[data-markdown-copy="exclude"],[data-thread-find-skip]';
   const answerLoadError=/^(?:無法載入這則回覆|无法加载此回复|无法加载这条回复|Unable to load (?:this )?(?:response|message)|Could not load (?:this )?(?:response|message))[。.!]?$/i;
+  const readyMermaid='[data-chatgpt-mermaid-preview] [data-mermaid-render-status="ready"] svg[role="img"]';
   const block='div,p,h1,h2,h3,h4,h5,h6,li,ul,ol,pre,blockquote,table,tr,section,article';
   function text(node){
     if(!node)return '';
@@ -55,6 +56,7 @@ export function readChatPage() {
     if(node.nodeType!==1||node.matches(ignored))return '';
     const tag=node.tagName.toLowerCase();
     const children=()=>joinMarkdown(Array.from(node.childNodes,markdown));
+    if(node.matches('[data-chatgpt-mermaid-preview]'))return '\n\n[Mermaid 圖表，請在原對話查看]\n\n';
     if(node.matches('.katex-display,.katex,math,[data-d-component="math"]')){
       const display=node.matches('.katex-display,[display="block"],[data-d-block]');
       let tex=node.querySelector('annotation[encoding="application/x-tex"]')?.textContent?.trim();
@@ -126,8 +128,11 @@ export function readChatPage() {
     const answer=render_error?'':rawAnswer;
     // A hidden pending marker may remain after hydration. Check for the actual code source.
     const pendingCode=responses.some(root=>Array.from(root.querySelectorAll('[data-client-defined-widget="code_block"]')).some(
-      widget=>visible(widget)&&!widgetCodeSource(widget)
+      widget=>visible(widget)&&!widgetCodeSource(widget)&&!visible(widget.querySelector(readyMermaid))
     ));
+    const final_actions=Array.from(turn.querySelectorAll('.turn-action-controls')).some(row=>visible(row)&&
+      visible(row.querySelector('button[aria-label="複製"],button[aria-label="Copy"]'))&&
+      visible(row.querySelector('button[aria-label="更多操作"],button[aria-label="More actions"]')));
     const selected=responses.map(e=>e.closest('[data-chatgpt-selection-message-id]')||e.querySelector('[data-chatgpt-selection-message-id]')).find(Boolean)||
       Array.from(turn.querySelectorAll('[data-chatgpt-selection-message-id]')).find(e=>!user?.contains(e)&&visible(e)&&!e.closest('[data-markdown-text-tone="tertiary"]'));
     const files=Array.from(turn.querySelectorAll('button[aria-label^="開啟 "][aria-label$=" 預覽"]')).filter(e=>!user?.contains(e)&&visible(e));
@@ -143,7 +148,7 @@ export function readChatPage() {
         external_images.push({index,title:image.alt||`网页引用图片 ${index+1}`,url:uri.href,delivery:'reference_only'});
       }else progress_images_ignored++;
     }
-    const unsupported_outputs=Array.from(turn.querySelectorAll('audio,video,canvas,iframe,svg')).filter(e=>!user?.contains(e)&&visible(e)&&!e.closest('[data-markdown-text-tone="tertiary"]')&&e.getBoundingClientRect().width>64&&e.getBoundingClientRect().height>32).map(e=>({kind:e.tagName.toLowerCase(),title:(e.getAttribute('aria-label')||e.getAttribute('title')||'').slice(0,200),export_status:'UNSUPPORTED'}));
+    const unsupported_outputs=Array.from(turn.querySelectorAll('audio,video,canvas,iframe,svg')).filter(e=>!user?.contains(e)&&visible(e)&&!e.closest('[data-markdown-text-tone="tertiary"]')&&(e.matches(readyMermaid)||(e.getBoundingClientRect().width>64&&e.getBoundingClientRect().height>32))).map(e=>({kind:e.matches(readyMermaid)?'mermaid':e.tagName.toLowerCase(),title:(e.getAttribute('aria-label')||e.getAttribute('title')||'').slice(0,200),export_status:'UNSUPPORTED'}));
     const sources=[];const seen=new Set();
     for(const response of responses)for(const a of response.querySelectorAll('a[href]')){
       if(!visible(a)||seen.has(a.href))continue;
@@ -159,11 +164,15 @@ export function readChatPage() {
     return {assistant_markdown:render_error?'':joinMarkdown(responses.flatMap((response,index)=>index?['\n\n',markdown(response)]:[markdown(response)])).trim(),extraction,generation_active,render_error,state:turn.getAttribute('data-talvt-turn-state'),user_id:user?.getAttribute('data-chatgpt-search-message-ids')??null,
       user_text:text(user?.querySelector('[data-search-result-target]')||user),assistant_id:selected?.getAttribute('data-chatgpt-selection-message-id')??null,
       assistant_text:answer,sources,external_images,render_ready:!render_error&&!pendingCode&&!!(answer||native_images.some(i=>i.complete&&i.naturalWidth>0)||external_images.length||unsupported_outputs.length)&&native_images.every(i=>i.complete&&i.naturalWidth>0),
-      artifacts,unsupported_outputs,regenerate:!!turn.querySelector('button[aria-label="重新產生回覆"]'),
+      artifacts,unsupported_outputs,final_actions,regenerate:!!turn.querySelector('button[aria-label="重新產生回覆"]'),
       reader_diagnostics:{version:4,pending_code:pendingCode,progress_images_ignored,answer_roots:responses.length,reasoning_nodes_excluded:all.filter(e=>e.closest('[data-markdown-text-tone="tertiary"]')).length,user_controls_excluded:user?.querySelectorAll(ignored).length??0}};
   });
   const editor=document.querySelector('form [contenteditable="true"]');
+  const attachmentGroup=editor?.closest('form')?.querySelector('[data-composer-attachments]');
+  const draft_attachments=Array.from(attachmentGroup?.querySelectorAll('button[aria-label]')??[])
+    .map(button=>button.getAttribute('aria-label').match(/^(?:移除|Remove) (.+)$/)?.[1]).filter(Boolean);
   return {url:location.href,title:document.title,turns,editor_present:visible(editor),draft:text(editor),draft_has_autolinks:!!editor?.querySelector('[data-rich-text-generated-autolink]'),
+    draft_attachments,draft_uploading:!!attachmentGroup?.querySelector('[role="progressbar"]'),
     model_label:document.querySelector('button[aria-label="選取 ChatGPT 模型"]')?.innerText,
     buttons:Array.from(document.querySelectorAll('form button')).filter(visible).map(b=>({label:b.getAttribute('aria-label'),disabled:b.disabled})),
     dialogs:Array.from(document.querySelectorAll('[role="dialog"],[role="alertdialog"]')).filter(e=>visible(e)&&!(

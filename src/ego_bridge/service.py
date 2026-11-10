@@ -5,11 +5,15 @@ import contextlib
 import json
 import hashlib
 import re
+import shutil
+import tempfile
+from pathlib import Path
 from urllib.parse import urlparse
 
 from .model import ACTIVE, TERMINAL, BridgeError, Settings, now, provisional_conversation
 from .store import Store
 from .artifacts import Artifacts
+from .uploads import decode_uploads
 
 
 LONG_RESEARCH_GUIDANCE = (
@@ -47,6 +51,9 @@ class Service:
         self.last_worker_error = None
 
     async def start(self):
+        for directory in self.settings.runtime.glob('research-input-*'):
+            if directory.is_dir() and not directory.is_symlink():
+                shutil.rmtree(directory)
         for op in self.store.active():
             if op["status"] == "PREPARING":
                 self.store.transition(op["id"], "QUEUED")
@@ -119,6 +126,7 @@ class Service:
                     project_identifier=q["project_id"], space_identifier=q["space_id"],
                     runtime_space_identifier=self.settings.space_id,
                     requested_model="GPT-6", requested_effort=op["payload"]["effort"],
+                    attachments=op['payload'].get('attachments', []),
                     observed=op["observed"], last_error=op["error"], blocked_predecessor=self.blocked_predecessor(op),
                     created_at=op["created_at"], updated_at=op["updated_at"],
                     soft_timeout_exceeded=elapsed > op["payload"]["soft_timeout"] and op["status"] not in TERMINAL,
@@ -171,7 +179,10 @@ class Service:
             context_mode=args.get('context_mode','project')
             if context_mode not in {'project','request_only_best_effort'}:raise BridgeError('INVALID_ARGUMENT','context_mode 必须为 project 或 request_only_best_effort。')
             if context_mode!='project':payload['context_mode']=context_mode
-            op = self.store.enqueue(owner, request, payload, self.settings.project_id, self.settings.space_id, qid)
+            attachments, uploads = decode_uploads(args.get('attachments'))
+            if attachments:
+                payload['attachments'] = attachments
+            op = self.store.enqueue(owner, request, payload, self.settings.project_id, self.settings.space_id, qid, uploads=uploads)
             self.wake.set()
             return {"ok": True, "accepted": True, "waiting_guidance": LONG_RESEARCH_GUIDANCE, **self.view(op)}
         if tool == "list_queries":
@@ -186,8 +197,12 @@ class Service:
             self.last_health_probe={'ok':bool(health.get('healthy')),'at':now(),'page_label':health.get('page_label')}
             return {"ok": True, "health":self.health_dimensions(), "runtime": health, "active_operations": len(self.store.active()), "worker_error": self.last_worker_error,"health_check_is_advisory":True,"execution_context":self.execution_context()}
         if tool == "diagnose" and not args.get("query_id"):
+            active_count = len(self.store.active())
+            queued_count = self.store.db.execute("SELECT COUNT(*) FROM operations WHERE status='QUEUED'").fetchone()[0]
             return {"ok": True, "worker_running": bool(self.worker and not self.worker.done()), "last_worker_error": self.last_worker_error,
-                    "health":self.health_dimensions(),"active_count": len(self.store.active()), "retention": {"policy":self.retention.policy(),"last_run":self.retention.last} if hasattr(self,"retention") else None, "model_policy": "GPT-6 / extra_high, high only", "max_active": self.settings.max_active,"execution_context":self.execution_context()}
+                    "health":self.health_dimensions(),"active_count": active_count, "queued_count": queued_count,
+                    "available_slots":max(0,self.settings.max_active-active_count),
+                    "retention": {"policy":self.retention.policy(),"last_run":self.retention.last} if hasattr(self,"retention") else None, "model_policy": "GPT-6 / extra_high, high only", "max_active": self.settings.max_active,"execution_context":self.execution_context()}
         qid = args.get("query_id")
         q = self.store.query(owner, qid)
         op = self.store.operation(args["message_id"]) if args.get("message_id") else self.store.latest(owner, qid)
@@ -285,7 +300,11 @@ class Service:
                     "blocked_predecessor": self.blocked_predecessor(op)}
         if tool == "recover_session":
             async with self.control:
+                op = self.store.operation(op['id'])
                 if op["status"] in {"OUTCOME_UNKNOWN", "NEEDS_ATTENTION", "WAITING_FOR_RESPONSE", "GENERATING", "SUBMITTING"}:
+                    if (op['status'] not in ACTIVE and op['submitted_at'] is not None
+                            and len(self.store.active()) >= self.settings.max_active):
+                        raise BridgeError('RECOVERY_BUSY', '执行名额已满，等当前研究结束后再恢复原任务。', safe=True, retryable=True)
                     await self.observe(op, recover=True)
             return {"ok": True, **self.view(self.store.operation(op["id"]))}
         if tool == "retry_query":
@@ -329,7 +348,7 @@ class Service:
                     for op in self.store.active():
                         if op["status"] in {"WAITING_FOR_RESPONSE", "GENERATING"}:
                             await self.observe(op)
-                    occupied = self.store.db.execute("SELECT COUNT(*) FROM operations WHERE status IN ('PREPARING','SUBMITTING','WAITING_FOR_RESPONSE','GENERATING') OR (status IN ('NEEDS_ATTENTION','OUTCOME_UNKNOWN') AND submitted_at IS NOT NULL)").fetchone()[0]
+                    occupied = len(self.store.active())
                     for op in self.store.candidates()[:max(0, self.settings.max_active - occupied)]:
                         await self.execute(op)
                 self.last_worker_error = None
@@ -357,13 +376,30 @@ class Service:
                 args["expected_history"] = previous["result"]["history"]
                 if not args["page_label"]:
                     args["page_label"] = previous["page_label"]
-            prepared = await self.adapter.call("prepare", **args)
+            attachments = op['payload'].get('attachments', [])
+            attachment_names = [file['filename'] for file in attachments]
+            with contextlib.ExitStack() as staging:
+                if attachments:
+                    directory = Path(staging.enter_context(tempfile.TemporaryDirectory(prefix='research-input-', dir=self.settings.runtime)))
+                    uploads = self.store.uploads(op_id)
+                    args['attachment_paths'] = []
+                    for file in attachments:
+                        name = file['filename']
+                        data = uploads.get(name)
+                        if data is None or hashlib.sha256(data).hexdigest() != file['sha256']:
+                            raise BridgeError('ATTACHMENT_DATA_MISSING', '暂存附件缺失或校验失败；未发送。', stage='prepare', action=True)
+                        path = directory/name
+                        path.write_bytes(data)
+                        path.chmod(0o600)
+                        args['attachment_paths'].append(str(path))
+                    args['attachment_names'] = attachment_names
+                prepared = await self.adapter.call("prepare", **args)
             self.store.db.execute('UPDATE queries SET space_id=?,updated_at=? WHERE id=?',(self.settings.space_id,now(),op['query_id']))
             self.store.patch(op_id, page_label=prepared["page_label"], baseline=prepared["baseline"], observed=prepared["observed"])
             # Durable intent MUST commit before crossing the non-idempotent click boundary.
             self.store.transition(op_id, "SUBMITTING")
             op = self.store.operation(op_id)
-            await self.adapter.call("submit", **self.browser_args(op))
+            await self.adapter.call("submit", **self.browser_args(op), attachment_names=attachment_names)
             self.store.transition(op_id, "WAITING_FOR_RESPONSE")
         except BridgeError as error:
             current = self.store.operation(op_id)
@@ -452,7 +488,7 @@ class Service:
                 render_error=render_error or "ANSWER_NOT_RENDERED"
             ready=bool(state=='complete' and not render_error and turn.get('render_ready',True) and not turn.get('generation_active',False)
                 and (turn['assistant_text'] or turn.get('artifacts') or turn.get('external_images') or turn.get('unsupported_outputs'))
-                and (turn.get('regenerate') or turn.get('artifacts') or turn.get('external_images') or turn.get('unsupported_outputs')))
+                and (turn.get('regenerate') or turn.get('final_actions') or turn.get('artifacts') or turn.get('external_images') or turn.get('unsupported_outputs')))
             signature=hashlib.sha256(json.dumps({k:turn.get(k) for k in ('assistant_text','assistant_markdown','assistant_id','sources','artifacts','external_images','unsupported_outputs')},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
             previous=(op.get('result') or {}).get('completion_confirmation') or {}
             same=ready and previous.get('signature')==signature

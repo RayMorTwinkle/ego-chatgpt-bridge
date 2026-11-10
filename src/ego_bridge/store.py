@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .model import ACTIVE, TERMINAL, TRANSITIONS, BridgeError, digest, identifier, now, provisional_conversation
+from .uploads import MAX_PENDING_BYTES
 
 
 class Store:
@@ -44,6 +45,9 @@ class Store:
           CREATE TABLE IF NOT EXISTS events(
             id INTEGER PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES operations(id),
             previous TEXT, status TEXT NOT NULL, at REAL NOT NULL, detail TEXT);
+          CREATE TABLE IF NOT EXISTS operation_uploads(
+            operation_id TEXT NOT NULL REFERENCES operations(id) ON DELETE CASCADE,
+            filename TEXT NOT NULL, content BLOB NOT NULL, PRIMARY KEY(operation_id,filename));
           CREATE INDEX IF NOT EXISTS operation_status ON operations(status,created_at);
         """)
         os.chmod(directory / "bridge.sqlite3", 0o600)
@@ -84,7 +88,7 @@ class Store:
         return self.operation(row[0])
 
     def enqueue(self, owner: str, request_id: str, payload: dict, project_id: str, space_id: int,
-                query_id: str | None = None) -> dict:
+                query_id: str | None = None, *, uploads=()) -> dict:
         kind = "continue" if query_id else "create"
         fingerprint = digest(dict(kind=kind, query_id=query_id, payload=payload))
         with self.transaction():
@@ -96,6 +100,10 @@ class Store:
             queued = self.db.execute("SELECT COUNT(*) FROM operations WHERE owner=? AND status='QUEUED'", (owner,)).fetchone()[0]
             if queued >= 100:
                 raise BridgeError("QUEUE_FULL", "该调用方已有 100 条待处理消息。", safe=True, retryable=True)
+            if uploads:
+                pending = self.db.execute('SELECT COALESCE(SUM(length(content)),0) FROM operation_uploads').fetchone()[0]
+                if pending + sum(len(data) for _, data in uploads) > MAX_PENDING_BYTES:
+                    raise BridgeError('UPLOAD_QUEUE_FULL', '待处理附件暂存已满，请等候或清理失败任务后重试。', safe=True, retryable=True)
             t = now()
             if query_id:
                 q = self.query(owner, query_id)
@@ -110,6 +118,7 @@ class Store:
             op_id = identifier("msg")
             self.db.execute("""INSERT INTO operations(id,query_id,owner,request_id,kind,fingerprint,sequence,status,payload,created_at,updated_at)
                                VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (op_id, query_id, owner, request_id, kind, fingerprint, sequence, "QUEUED", json.dumps(payload, ensure_ascii=False), t, t))
+            self.db.executemany('INSERT INTO operation_uploads VALUES(?,?,?)', ((op_id, name, data) for name, data in uploads))
             self.db.execute("INSERT INTO events(operation_id,status,at) VALUES(?,?,?)", (op_id, "QUEUED", t))
             self.db.execute("UPDATE queries SET updated_at=? WHERE id=?", (t, query_id))
         return self.operation(op_id)
@@ -124,6 +133,8 @@ class Store:
             t = now()
             self.db.execute("UPDATE operations SET status=?,error=?,result=COALESCE(?,result),updated_at=?,submitted_at=CASE WHEN ?='SUBMITTING' THEN ? ELSE submitted_at END WHERE id=?",
                             (status, json.dumps(error) if error else None, json.dumps(result, ensure_ascii=False) if result else None, t, status, t, op_id))
+            if status in {'SUBMITTING', 'CANCELLED', 'FAILED'}:
+                self.db.execute('DELETE FROM operation_uploads WHERE operation_id=?', (op_id,))
             if status != op["status"]:
                 self.db.execute("INSERT INTO events(operation_id,previous,status,at,detail) VALUES(?,?,?,?,?)", (op_id, op["status"], status, t, json.dumps(error) if error else None))
             self.db.execute("UPDATE queries SET updated_at=? WHERE id=?", (t, op["query_id"]))
@@ -153,6 +164,9 @@ class Store:
     def active(self) -> list[dict]:
         rows = self.db.execute("SELECT id FROM operations WHERE status IN ('PREPARING','SUBMITTING','WAITING_FOR_RESPONSE','GENERATING') ORDER BY created_at").fetchall()
         return [self.operation(r[0]) for r in rows]
+
+    def uploads(self, op_id: str) -> dict[str, bytes]:
+        return dict(self.db.execute('SELECT filename,content FROM operation_uploads WHERE operation_id=?', (op_id,)))
 
     def list_queries(self, owner: str, status: str | None = None, limit: int = 20, offset: int = 0) -> list[dict]:
         rows = self.db.execute("""SELECT q.*,o.status,o.id AS message_id FROM queries q JOIN operations o ON o.query_id=q.id

@@ -49,8 +49,11 @@ async def test_real_sdk_handshake_tools_and_owner_context(tmp_path, caplog):
                     assert not result.isError
                     assert result.structuredContent['ok']
                     assert result.structuredContent['queries']==[]
-                    submission = {'text': 'private research text', 'request_id': 'sdk-wait'}
+                    submission = {'text': 'private research text', 'request_id': 'sdk-wait',
+                                  'attachments': [{'filename': 'sdk.txt', 'content_base64': 'aGVsbG8='}]}
                     created=(await session.call_tool('create_query',submission)).structuredContent
+                    assert created['attachments'][0]['filename'] == 'sdk.txt'
+                    assert 'content_base64' not in str(created)
                     duplicate=(await session.call_tool('create_query',submission)).structuredContent
                     trace = created['submission_trace']
                     assert trace['http_received_at'] <= trace['dispatch_started_at'] <= trace['operation_created_at'] <= trace['response_ready_at']

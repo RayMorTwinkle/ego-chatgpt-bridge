@@ -55,7 +55,7 @@ stateDiagram-v2
 
 SQLite 使用 WAL、synchronous=FULL、foreign_keys 和启动 quick_check，损坏时停止，不重建空库。文件与元数据不在同一事务中，使用先验证并原子重命名、再发布 AVAILABLE 的协议；中断可根据已有文件对账。
 
-默认最多两个跨会话活跃任务，Ego 操作始终串行，同一 Conversation 按顺序发送。未知结果和已提交的 NEEDS_ATTENTION 继续占槽，防止网页可能仍生成时无限创建新任务。
+默认最多两个跨会话活跃任务，Ego 操作始终串行，同一 Conversation 按顺序发送。`NEEDS_ATTENTION` 和 `OUTCOME_UNKNOWN` 释放执行名额并保留原任务的对账记录。超时后旧网页仍可能继续生成。恢复已提交的任务需要有可用名额，且只核对原会话。`diagnose` 返回 `active_count`、`queued_count` 和 `available_slots`。
 
 运行目录 flock 防止多写入进程，用户 apps 目录内的 space-locks 防止不同运行目录争抢同一 Ego 空间。它不能阻止用户或非协作程序操作浏览器，因此另做空间、会话和历史校验。
 

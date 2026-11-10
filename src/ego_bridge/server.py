@@ -13,7 +13,7 @@ from uuid import uuid4
 from mcp.server.fastmcp import Context, FastMCP
 from mcp import types
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import Field
+from pydantic import BaseModel, Field
 from starlette.applications import Starlette
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
@@ -26,9 +26,11 @@ from .service import LONG_RESEARCH_GUIDANCE, Service
 from .store import Store
 from .auth import load_clients
 from .oauth import PUBLIC_PATHS
+from .uploads import MAX_FILES, MAX_REQUEST_BYTES
 
 
 SUBMISSION_TOOLS = {"create_query", "continue_query"}
+ATTACHMENT_ROUTES = {"/mcp"} | {prefix + tool for prefix in ("/api/", "/ui/api/tool/") for tool in SUBMISSION_TOOLS}
 submission_log = logging.getLogger("ego_bridge.submission")
 
 SoftTimeout = Annotated[float, Field(description=(
@@ -43,6 +45,14 @@ WaitTimeout = Annotated[float, Field(description=(
     "本次等待的秒數，範圍 0–30，預設 25。0 會立即取快照。"
     "timed_out=true 只表示本次等候未見新變化，任務會繼續，請用原 ID 和 cursor 再等。"
 ))]
+
+
+class Attachment(BaseModel):
+    filename: Annotated[str, Field(description='原始檔名，僅檔名。')]
+    content_base64: Annotated[str, Field(description='原始檔案位元組的標準 Base64 編碼。')]
+
+
+Attachments = Annotated[list[Attachment], Field(max_length=MAX_FILES, description='本輪附件。原始大小合計最多 5 MiB。')]
 
 
 class TokenAuth:
@@ -89,7 +99,7 @@ class TokenAuth:
         # Native Agent clients do not send Origin. Browser-origin access is denied.
         if not ui and not oauth_route and "origin" in headers:
             return await JSONResponse({"ok": False, "error": {"error_code": "ORIGIN_NOT_ALLOWED"}}, status_code=403)(scope, receive, send)
-        max_body=16384 if oauth_route else 1024*1024
+        max_body=16384 if oauth_route else MAX_REQUEST_BYTES if path in ATTACHMENT_ROUTES else 1024*1024
         try:
             if int(headers.get("content-length", "0")) > max_body:
                 return await JSONResponse({"error": "REQUEST_TOO_LARGE"}, status_code=413)(scope, receive, send)
@@ -204,15 +214,15 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
 
     @mcp.tool(description=LONG_RESEARCH_GUIDANCE + (
         "在固定專案新建非同步查詢。request_id 是呼叫方的冪等鍵。"
-        "支援 GPT-6 的 extra_high 與 high。context_mode=request_only_best_effort 可附加範圍約束。"
+        "支援 GPT-6 的 extra_high 與 high。context_mode=request_only_best_effort 可附加範圍約束。可用 attachments 附加檔案。"
     ))
-    async def create_query(text: str, request_id: str, ctx: Context, effort: str = "extra_high", model: str = "GPT-6", soft_timeout: SoftTimeout = 600, hard_timeout: HardTimeout = 3600, context_mode: str = "project") -> dict[str, Any]:
-        return await call(ctx, "create_query", dict(text=text, request_id=request_id, effort=effort, model=model, soft_timeout=soft_timeout, hard_timeout=hard_timeout, context_mode=context_mode))
+    async def create_query(text: str, request_id: str, ctx: Context, effort: str = "extra_high", model: str = "GPT-6", soft_timeout: SoftTimeout = 600, hard_timeout: HardTimeout = 3600, context_mode: str = "project", attachments: Attachments | None = None) -> dict[str, Any]:
+        return await call(ctx, "create_query", dict(text=text, request_id=request_id, effort=effort, model=model, soft_timeout=soft_timeout, hard_timeout=hard_timeout, context_mode=context_mode, attachments=[file.model_dump() for file in attachments or []]))
 
     @mcp.tool()
-    async def continue_query(query_id: str, text: str, request_id: str, ctx: Context, effort: str = "extra_high", soft_timeout: SoftTimeout = 600, hard_timeout: HardTimeout = 3600, context_mode: str = "project") -> dict[str, Any]:
-        """在 Query ID 对应的同一网页会话追加消息；同会话按接收顺序执行。"""
-        return await call(ctx, "continue_query", dict(query_id=query_id, text=text, request_id=request_id, effort=effort, soft_timeout=soft_timeout, hard_timeout=hard_timeout, context_mode=context_mode))
+    async def continue_query(query_id: str, text: str, request_id: str, ctx: Context, effort: str = "extra_high", soft_timeout: SoftTimeout = 600, hard_timeout: HardTimeout = 3600, context_mode: str = "project", attachments: Attachments | None = None) -> dict[str, Any]:
+        """在 Query ID 对应的同一网页会话追加消息；同会话按接收顺序执行。可用 attachments 附加文件。"""
+        return await call(ctx, "continue_query", dict(query_id=query_id, text=text, request_id=request_id, effort=effort, soft_timeout=soft_timeout, hard_timeout=hard_timeout, context_mode=context_mode, attachments=[file.model_dump() for file in attachments or []]))
 
     @mcp.tool()
     async def get_query_status(query_id: str, ctx: Context, message_id: str | None = None) -> dict[str, Any]:

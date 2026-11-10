@@ -162,6 +162,25 @@ test('code widget must hydrate before the turn is ready for completion',()=>{
   assert.equal(readChatPage().turns[0].render_ready,true);
 });
 
+test('reply action row is completion evidence when regenerate is inside the menu',()=>{
+  fixture(user()+body()+'<div class="turn-action-controls"><button aria-label="複製"></button><button aria-label="更多操作"></button></div>','complete');
+  const turn=readChatPage().turns[0];
+  assert.equal(turn.regenerate,false);
+  assert.equal(turn.final_actions,true);
+  document.querySelector('.turn-action-controls').hidden=true;
+  assert.equal(readChatPage().turns[0].final_actions,false);
+});
+
+test('rendered Mermaid in a code widget is an unsupported output, not pending code',()=>{
+  fixture(user()+'<div data-markdown-text-style="assistant-message"><p>Diagram follows</p><div data-client-defined-widget="code_block"><div data-chatgpt-mermaid-preview><div data-mermaid-render-status="ready"><svg role="img" aria-label="Mermaid 圖表"><text>Node</text></svg></div></div></div></div>','complete');
+  const turn=readChatPage().turns[0];
+  assert.equal(turn.render_ready,true);
+  assert.equal(turn.reader_diagnostics.pending_code,false);
+  assert.deepEqual(turn.unsupported_outputs,[{kind:'mermaid',title:'Mermaid 圖表',export_status:'UNSUPPORTED'}]);
+  assert.match(turn.assistant_markdown,/Mermaid 圖表/);
+  assert.doesNotMatch(turn.assistant_markdown,/Node/);
+});
+
 test('live CodeMirror widgets preserve language and every editor line',()=>{
   fixture(user()+'<div data-markdown-text-style="assistant-message"><div data-client-defined-widget="code_block"><div data-code-block="true"><div data-markdown-copy="exclude"><button>Run</button></div><div class="cm-content" data-language="python"><div class="cm-line"><span>s</span> = 4</div><div class="cm-line"><br></div><div class="cm-line"><br></div><div class="cm-line">print(s)</div></div></div></div></div>','complete');
   const turn=readChatPage().turns[0];

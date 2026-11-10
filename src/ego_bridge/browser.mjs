@@ -2,6 +2,7 @@
 // `input` is injected as a JSON value by adapter.py, never through a shell.
 const MODEL_BUTTON = 'loc=css:button[aria-label="選取 ChatGPT 模型"]';
 const EDITOR = 'loc=css:form [contenteditable="true"]';
+const FILE_INPUT = 'loc=css:form input[type=file][multiple]:is(:not([accept]),[accept=""])';
 const norm = s => String(s ?? '').replace(/\s+/g, ' ').trim();
 const fail = (code, message, stage='browser') => { const e=new Error(message); e.code=code; e.stage=stage; throw e; };
 const identity = url => {
@@ -54,6 +55,29 @@ async function state(page) {
   const result=await page.evaluate(readChatPage);
   result.identity=identity(result.url);
   return result;
+}
+
+function checkAttachments(s, names, stage) {
+  const same=JSON.stringify([...s.draft_attachments].sort())===JSON.stringify([...names].sort());
+  if(!same||s.draft_uploading) fail('DRAFT_ATTACHMENT_MISMATCH','草稿附件与本轮请求不一致或尚未完成上传；未发送。',stage);
+  if(names.length && (s.alerts.some(text=>/上[傳传]失[敗败]|upload failed|failed to upload/i.test(text)) ||
+      !s.buttons.some(b=>b.label==='傳送'&&!b.disabled)))
+    fail('ATTACHMENT_UPLOAD_INCOMPLETE','网页未确认附件可发送；未发送。',stage);
+}
+
+async function uploadAttachments(page, paths, names) {
+  try {
+    await page.setInputFiles(FILE_INPUT,paths);
+    await page.waitForFunction(files=>{
+      const group=document.querySelector('form [data-composer-attachments]');
+      const labels=Array.from(group?.querySelectorAll('button[aria-label]')??[],b=>b.getAttribute('aria-label'));
+      return files.every(name=>labels.includes('移除 '+name)||labels.includes('Remove '+name)) &&
+        !group?.querySelector('[role="progressbar"]');
+    },names,{timeout:35000});
+  } catch(error) {
+    fail('ATTACHMENT_UPLOAD_FAILED','网页上传失败或未及时显示附件；未发送。请检查网页草稿。','prepare');
+  }
+  checkAttachments(await state(page),names,'prepare');
 }
 
 function check(s, conversation) {
@@ -318,6 +342,7 @@ async function main() {
   if(input.action==='prepare') {
     if(!input.conversation_url&&(s.identity.conversation||s.turns.length)) fail('CONVERSATION_MISMATCH','新查询只能从空的项目输入页发起，不能追加到未绑定的会话。','prepare');
     if(s.turns.some(t=>t.state!=='complete')) fail('CONVERSATION_BUSY','页面中存在尚未完成的消息。','prepare');
+    if(s.draft_attachments.length||s.draft_uploading) fail('DRAFT_ATTACHMENTS_PRESENT','输入框已有附件。请核对并清理草稿后重试。','prepare');
     if(norm(s.draft) && norm(s.draft)!==norm(input.send_text)) {
       if(!input.conversation_url&&(input.discardable_drafts??[]).some(d=>norm(d)===norm(s.draft))){
         await page.fill(EDITOR,'');receipt.discarded_unsent_bridge_draft=true;s=await state(page);
@@ -349,6 +374,7 @@ async function main() {
       if(after.draft_has_autolinks)fail('DRAFT_SERIALIZATION_UNSAFE','网页仍将提示词自动转换成富链接；未发送。','prepare');
     }
     if(norm(after.draft)!==norm(input.send_text)) fail('DRAFT_MISMATCH','草稿读回与请求不一致。','prepare');
+    if(input.attachment_paths?.length) await uploadAttachments(page,input.attachment_paths,input.attachment_names);
     return {...receipt,baseline:s,observed:model,account:accountState};
   }
   if(input.action==='submit') {
@@ -362,6 +388,7 @@ async function main() {
     const before=await state(page);check(before,input.conversation_url?identity(input.conversation_url).conversation:null);
     if(before.draft_has_autolinks)fail('DRAFT_SERIALIZATION_UNSAFE','模型核验后出现自动富链接；未发送。','submit_precondition');
     if(norm(before.draft)!==norm(input.send_text)) fail('DRAFT_MISMATCH','模型验证后草稿发生变化。','submit_precondition');
+    checkAttachments(before,input.attachment_names??[],'submit_precondition');
     receipt.click_attempted=true;
     await page.click('loc=css:button[aria-label="傳送"]');
     receipt.clicked=true;
