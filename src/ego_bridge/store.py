@@ -172,7 +172,7 @@ class Store:
         return dict(self.db.execute('SELECT filename,content FROM operation_uploads WHERE operation_id=?', (op_id,)))
 
     def list_queries(self, owner: str, status: str | None = None, limit: int = 20, offset: int = 0) -> list[dict]:
-        rows = self.db.execute("""SELECT q.*,o.status,o.id AS message_id FROM queries q JOIN operations o ON o.query_id=q.id
+        rows = self.db.execute("""SELECT q.*,o.status,o.sequence AS rounds,o.id AS message_id FROM queries q JOIN operations o ON o.query_id=q.id
            WHERE q.owner=? AND o.sequence=(SELECT MAX(p.sequence) FROM operations p WHERE p.query_id=q.id)
            AND (? IS NULL OR o.status=?) ORDER BY q.created_at DESC LIMIT ? OFFSET ?""", (owner, status, status, limit, offset)).fetchall()
         result=[]

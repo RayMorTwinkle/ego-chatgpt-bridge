@@ -23,7 +23,7 @@ from starlette.routing import Route
 from .auth import BrowserSessions, COOKIE_NAME, HTTP_COOKIE_NAME, SESSION_SECONDS, env_values, token_owner
 
 SCOPES = ['research:read', 'research:write']
-WRITE_TOOLS = {'create_query','continue_query','recover_session','retry_query','cancel_query','collect_artifacts','delete_query','health_check'}
+WRITE_TOOLS = {'ask','cancel','create_query','continue_query','recover_session','retry_query','cancel_query','collect_artifacts','delete_query','health_check'}
 PUBLIC_PATHS = {'/mcp','/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp',
     '/.well-known/oauth-authorization-server','/authorize','/token','/register','/revoke'}
 

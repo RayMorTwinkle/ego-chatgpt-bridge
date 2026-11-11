@@ -1,4 +1,5 @@
 {
+  "mcp_legacy_tools": false,
   "host": "10.126.126.11",
   "tls_enabled": false,
   "port": 8766,

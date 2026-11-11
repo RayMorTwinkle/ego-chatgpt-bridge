@@ -31,7 +31,7 @@ async def test_auth_host_origin_and_body_boundaries(tmp_path):
 
 
 async def test_mcp_accepts_attachment_body_above_sdk_default_limit(tmp_path):
-    app=build_app(Settings(tmp_path),adapter=FakeBrowser(),clients={'alice':'a'*40})
+    app=build_app(Settings(tmp_path,mcp_legacy_tools=True),adapter=FakeBrowser(),clients={'alice':'a'*40})
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),headers={'Authorization':'Bearer '+'a'*40}) as http:
             async with streamable_http_client('https://localhost/mcp',http_client=http) as (read,write,_):
@@ -44,13 +44,13 @@ async def test_mcp_accepts_attachment_body_above_sdk_default_limit(tmp_path):
 
 async def test_real_sdk_handshake_tools_and_owner_context(tmp_path, caplog):
     caplog.set_level(logging.INFO, logger="ego_bridge.submission")
-    app=build_app(Settings(tmp_path),adapter=FakeBrowser(),clients={'alice':'a'*40})
+    app=build_app(Settings(tmp_path,mcp_legacy_tools=True),adapter=FakeBrowser(),clients={'alice':'a'*40})
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),headers={'Authorization':'Bearer '+'a'*40}) as http:
             async with streamable_http_client('https://localhost/mcp',http_client=http) as (read,write,_):
                 async with ClientSession(read,write) as session:
                     initialization=await session.initialize()
-                    assert 'result_is_partial' in initialization.instructions and '服務端' in initialization.instructions
+                    assert 'ask' in initialization.instructions and '服务端' in initialization.instructions
                     assert initialization.serverInfo.version == version("ego-chatgpt-bridge")
                     tools = {t.name: t for t in (await session.list_tools()).tools}
                     catalog = {name: tool.description for name, tool in tools.items()}
@@ -84,10 +84,8 @@ async def test_real_sdk_handshake_tools_and_owner_context(tmp_path, caplog):
                     assert [event for event, _ in matching] == ['submission_received', 'submission_result']
                     assert matching[1][1]['query_id'] == created['query_id']
                     assert created['accepted'] and created['next_action']['tool']=='wait_query'
-                    for phrase in ('10 分鐘以上','wait_query','請勿重送','complete=true'):
-                        assert all(phrase in channel for channel in (
-                            initialization.instructions, catalog['create_query'], created['waiting_guidance'],
-                        ))
+                    assert '推荐使用 ask' in catalog['create_query']
+                    assert 'wait_query' in created['waiting_guidance']
                     waited=await session.call_tool('wait_query',{'query_id':created['query_id'],'timeout_seconds':0})
                     assert not waited.isError and waited.structuredContent['changed']
                     assert 'result' not in waited.structuredContent

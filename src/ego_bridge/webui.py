@@ -22,7 +22,7 @@ def ui_routes(service,clients,sessions=None):
     sessions=sessions or BrowserSessions(clients,values.get('WEB_SESSION_SECRET') or secrets.token_urlsafe(48),values.get('EGO_BRIDGE_OWNER') or settings.default_owner)
     jobs=ExportJobs(service)
     static=Path(__file__).with_name('web')
-    allowed={'create_query','continue_query','get_query_status','get_query_result','list_queries','health_check','diagnose','recover_session','retry_query','cancel_query','list_messages','get_conversation_info','delete_query','list_artifacts','collect_artifacts','get_artifact'}
+    allowed={'ask','wait','get','list','cancel','get_thread','wait_query','read_artifact','create_query','continue_query','get_query_status','get_query_result','list_queries','health_check','diagnose','recover_session','retry_query','cancel_query','list_messages','get_conversation_info','delete_query','list_artifacts','collect_artifacts','get_artifact'}
 
     def response(data,status=200):return JSONResponse(data,status_code=status,headers={'Cache-Control':'no-store'})
 

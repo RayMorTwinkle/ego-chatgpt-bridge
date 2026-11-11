@@ -78,6 +78,7 @@ class Settings:
     browser_timeout: float = 90
     host: str = "127.0.0.1"
     port: int = 8766
+    mcp_legacy_tools: bool = False
     tls_enabled: bool = False
     allowed_hosts: tuple[str, ...] = ("localhost", "127.0.0.1")
     allowed_client_cidrs: tuple[str, ...] = ("127.0.0.0/8",)

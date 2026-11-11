@@ -1,47 +1,56 @@
-# 接口与产物交付
+# 接口与产物交付（v0.5.0）
 
-MCP `/mcp`、HTTP `POST /api/<tool>`、CLI 和 stdio 共用同一 Service。网络入口默认使用 EasyTier 内 HTTP、Bearer token、Host 白名单和来源 CIDR；TLS 可选。WebUI 使用同一个身份 token 登录后签发的一年 cookie；普通 MCP／HTTP API 不接受 WebUI cookie 替代 Bearer。
+MCP `/mcp`、REST `POST /api/<tool>`、WebUI `POST /ui/api/tool/<name>` 共用 Service。MCP/REST 使用调用方 Bearer token，WebUI 使用登录 cookie；身份之间的任务和文件隔离。默认 EasyTier HTTP，TLS 可选。
 
-## MCP 工具
+## 默认 MCP 工具
 
-| 工具 | 必填参数 | 行为 |
+| 工具 | 参数 | 行为 |
 | --- | --- | --- |
-| create_query | text、request_id | 固定專案新会话；model 只允许 GPT-6，effort=extra_high/high |
-| continue_query | query_id、text、request_id | 同一会话按序追加 |
-| get_query_status | query_id | 可选 message_id；状态、错误、阻塞前序 |
-| get_query_result | query_id | 可选 message_id；文字、链接、产物及交付完整性 |
-| wait_query | query_id | 可選 message_id、cursor、timeout_seconds（0–30）；等候狀態變化 |
-| list_queries | 无 | status、limit=1..100、offset；身份隔离 |
-| health_check | 无 | 实际检查浏览器、空间、账户显示名、專案和模型控件 |
-| diagnose | 无 | 可选 query_id/message_id，返回结构化诊断 |
-| recover_session | query_id | 对账已提交消息，不重发 |
-| retry_query | query_id | 仅允许提交边界前的安全重试 |
-| cancel_query | query_id | 排队可确定取消，已发送仅尽力停止 |
-| list_messages | query_id | 按序列出消息操作 |
-| get_conversation_info | query_id | 空间／專案／会话映射 |
-| delete_query | query_id | 删除终止任务的本地记录及缓存，不删除远端会话 |
-| list_artifacts | query_id | 可选 message_id；列出产物元数据 |
-| collect_artifacts | query_id | 重新下载同一已生成回答的产物，不再提问 |
-| get_artifact | artifact_id | 当前身份的单个产物元数据 |
-| read_artifact | artifact_id | 可选 inline_image；小图片原生 ImageContent，其他为 ResourceLink |
+| ask | text；query_id=null、effort="extra_high"、attachments=null、request_id=null、wait_seconds=0 | 新建或在原会话追问，顺便等待可省一次调用 |
+| wait | query_id；message_id=null、timeout_seconds=120 | 最多等待 300 秒，终止时直接返回最终结果 |
+| get | query_id；message_id=null、verbose=false | 精简结果；verbose=true 返回旧版 get_query_result compact=false 默认完整 payload |
+| list | status=null、limit=20（1..100） | 列出 query_id、title、status、rounds、updated_at |
+| read_artifact | artifact_id；inline_image=true | 小图片直接返回，其余返回 MCP 资源链接 |
+| cancel | query_id；message_id=null | 排队时取消，已开始则尽力停止并等待网页确认 |
+| diagnose | query_id=null、message_id=null | 仅在 needs_you 且 what_to_do 无法解决时给维护者用 |
 
-text 为 1..100000 字符，request_id 为 1..200 字符。默认 soft_timeout=600、hard_timeout=3600 秒，需 `1 <= soft <= hard <= 86400`。每身份最多 100 条等待消息。MCP 和研究提交入口请求体上限为 56 MiB，其他普通 API 为 1 MiB。
+`text` 为 1..100000 字符，effort 仅 extra_high/high。wait_seconds 和 timeout_seconds 均为有限数字 0..300。省略 message_id 时固定读取调用开始时的最新轮次，等待不会跳到后来追加的轮次。等待中不返回正文；有 progressToken 时约每 10 秒发送 MCP progress 通知。MCP 使用 SSE 传输通知和最终响应；REST 只在等待结束时返回 JSON。
 
-Query ID 对应一个 Conversation；Message ID 对应一次输入／响应。幂等键属于调用方：同键同参数复用原操作，异参冲突。发送文本带内部请求标记以便页面对账，这不是网页服务端提供的幂等键。
+### 自动去重
 
-`create_query` 回傳 `accepted=true`、任務識別碼與 `waiting_guidance`。單次任務可能需要 10 分鐘以上。帶回 `wait_query` 回傳的 cursor 繼續等候原任務。`progress` 提供最近觀測時間、正文長度和來源數，即使 cursor 未變也會回傳。`last_observed_at` 是最近的觀測時間，正文可能與前一次相同。`generation_done` 可能隨網頁狀態回退，請以 `complete=true` 判定交付，再驗收內容品質。
+省略 request_id：按身份、输入 query_id（新建为空）、原始文本、附件 SHA-256 的排序集合（保留重复数量）比较。未终止的操作或创建不超过 600 秒的操作直接复用；OUTCOME_UNKNOWN 在超过窗口后也继续复用。附件名、顺序、effort 不参与自动去重。匹配和入队之间不让出执行权，复用持久化操作记录，重启后仍有效。显式 request_id 则沿用原来的永久幂等语义，同键异参冲突；可用新键明确要求相同内容的新请求。
 
-| 超時參數（秒） | 觸發後的行為 |
-| --- | --- |
-| `wait_query.timeout_seconds`（預設 25，範圍 0–30） | 這次等待結束。`timed_out=true` 表示這次未見新變化，保留原 ID 和 cursor 繼續等待。0 會立即取快照。 |
-| `soft_timeout`（預設 600） | `soft_timeout_exceeded=true` 提醒呼叫端，任務繼續。進入提交前從入列起算，之後從提交時間起算。 |
-| `hard_timeout`（預設 3600） | 從進入提交起算。若後續觀察發現超時且尚未完成，橋接器停止自動觀察並標記 `NEEDS_ATTENTION`。網頁可能繼續生成。用原 ID 執行 `recover_session` 對帳，再依 `next_action` 取得結果。 |
+### 精简结果
 
-MCP 或 HTTP API 提交回應的 `submission_trace` 提供服務端入口、工具派送、任務建立及回應就緒時間，皆為 Unix 秒。`trace_id` 可對照服務日誌。用同一個冪等鍵重試時，會有本次呼叫的 trace ID，任務建立時間沿用原操作。
+```json
+{"ok":true,"query_id":"q_...","message_id":"msg_...","round":1,"status":"running","elapsed_seconds":12.0,"answer_characters":0,"phase":"思考中","next":{"tool":"wait","arguments":{"query_id":"q_...","message_id":"msg_...","timeout_seconds":120}}}
+```
+
+```json
+{"ok":true,"query_id":"q_...","message_id":"msg_...","round":1,"status":"done","elapsed_seconds":25.0,"answer_characters":4,"answer":"回答正文","files":[{"artifact_id":"art_...","filename":"report.pdf","mime_type":"application/pdf","size_bytes":12345,"download_url":"http://<配置地址>:8766/artifacts/art_.../content"}],"sources":["https://example.com/"]}
+```
+
+空 files/sources、非运行时 phase/next、未完成时 answer 均省略。正文为 Markdown。状态为 running/done/needs_you/failed/cancelled；错误或需处理时包含 `problem={code,message,what_to_do}`。参数错误返回 ok=false、status=failed 和 problem；任务状态失败仍可 ok=true，表示状态读取成功。
+
+COMPLETED 且生成与文件完整才映射 done；其余终止但不完整状态映射 needs_you。QUEUED/PREPARING/SUBMITTING/WAITING_FOR_RESPONSE/GENERATING 映射 running。FAILED、CANCELLED 分别映射 failed、cancelled。最终交付不代表内容质量验收。
+
+发送结果不确定且有提交记录和基线时，服务端自动 recover_session；已确认生成完成但文件未齐时自动 collect_artifacts。对外分别显示 running/核对中、running/收集文件中。每轮共 3 次、至少间隔 10 秒，次数存入数据库；执行名额满时延后且不消耗次数。失败耗尽后 needs_you，what_to_do 说明自动处理已停止。不支持的输出直接 needs_you。自动路径绝不重新发送。
+
+MCP 普通工具结果只含 structuredContent 和一个 TextContent：未完成为紧凑 JSON；done 时文本为一行状态头加 Markdown 正文。消费者选一个通道读取。read_artifact 保持原有图片/资源协议，diagnose 保留完整诊断。
+
+## WebUI 会话串
+
+`get_thread(query_id)` 通过 REST、WebUI service dispatch 提供，不注册到 MCP。返回：
+
+```json
+{"ok":true,"query_id":"q_...","title":"用户的第一条输入","conversation_url":null,"status":"running","messages":[{"message_id":"msg_...","round":1,"status":"running","phase":"生成中","prompt":"用户原文","attachments":[],"answer":"已观察到的 Markdown 快照","partial":true,"files":[],"sources":[],"problem":null,"created_at":123.0,"updated_at":125.0}]}
+```
+
+messages 按 round 升序，包含全部轮次；answer 可以是部分正文，partial 表示生成尚未完整。query 级 status 为最新轮次状态，title 为第一条输入前 160 字符。旧 list_queries 每项新增 rounds，其他字段保留。
 
 ## 研究附件
 
-WebUI 的「新建研究」和「在此会话继续研究」可选本机文件。MCP、HTTP API 和 CLI 的 `create_query` 与 `continue_query` 共用可选的 `attachments` 参数。
+WebUI 的「新建研究」和「在此会话继续研究」可选本机文件。MCP、HTTP API 和 CLI 的 `ask`（也兼容 `create_query` 与 `continue_query`） 共用可选的 `attachments` 参数。
 
 ```json
 {"text":"读取附件并总结。","request_id":"research-with-file-01","attachments":[{"filename":"notes.txt","content_base64":"aGVsbG8K"}]}
@@ -53,41 +62,28 @@ WebUI 的「新建研究」和「在此会话继续研究」可选本机文件�
 
 附件字节在排队及发送前故障时私有暂存，进入提交或取消排队后删除暂存记录。暂存总量最多 400 MiB。备份可能包含快照当时尚在暂存的附件。ChatGPT 中的附件随远端会话管理。
 
-## 结果
+## 兼容工具
 
-```json
-{
-  "ok": true,
-  "query_id": "q_...",
-  "message_id": "msg_...",
-  "status": "COMPLETED",
-  "generation_complete": true,
-  "delivery_complete": true,
-  "complete": true,
-  "observed": {"model":"GPT-6","effort":"extra_high","verification":"ui_selection","backend_verified":false},
-  "result": {
-    "content": "可见回答文字，也可能为空而只有图片",
-    "sources": [{"title":"来源","url":"https://example.com/"}],
-    "artifacts": [{
-      "artifact_id":"art_...","filename":"image-1.png","status":"AVAILABLE",
-      "mime_type":"image/png","kind":"image","size_bytes":12345,"sha256":"...",
-      "download_url":"http://<配置地址>:8766/artifacts/art_.../content",
-      "requires_authentication":true
-    }],
-    "unsupported_outputs":[],
-    "artifact_discovery":"rendered_ui_only",
-    "delivery_phase":"AVAILABLE"
-  }
-}
-```
+config.json 的 `mcp_legacy_tools` 默认 false；true 时额外注册旧工具（与 read_artifact、diagnose 共享同名工具）。REST、WebUI、CLI 不受目录开关影响，始终支持新旧名字。CLI 旧工具的 `--wait` 及退出码不变。
 
-`generation_complete` 描述已确认渲染的网页生成信号；`delivery_complete` 描述已发现的产物是否就绪；两者满足且操作完成后 complete 才为 true。部分失败保留文字和错误，不用空文件制造成功。默认读取最新消息，历史结果传 message_id。
+| 旧工具 | 行为 |
+| --- | --- |
+| create_query / continue_query | text、request_id 必填；continue_query 另需 query_id |
+| get_query_status / get_query_result | query_id，可指定 message_id；完整状态与结果 |
+| wait_query | 0..30 秒，默认 25；携带 cursor 等待变化，默认不返回正文 |
+| list_queries | 旧状态筛选、limit/offset 分页，新增 rounds |
+| health_check | 浏览器诊断 |
+| recover_session / retry_query | 恢复原消息；只有未发送的任务可重试发送 |
+| cancel_query / delete_query | 尽力停止／删除本地终止记录 |
+| list_messages / get_conversation_info | 消息列表／会话映射 |
+| list_artifacts / collect_artifacts / get_artifact | 文件列表／重收集／元数据 |
+| read_artifact / diagnose | 文件读取／维护者诊断 |
 
-产物状态：PENDING → DOWNLOADING → AVAILABLE／FAILED。记录先落库，临时字节验证后原子重命名并 fsync，再发布元数据。中断后的已完成文件可对账，不再次提问。默认单文件最多 50 MiB，超限、空文件、签名或容器不匹配均失败。
+旧提交仍支持 model="GPT-6"、context_mode="project" 或 "request_only_best_effort"、soft_timeout=600、hard_timeout=3600，要求 1 <= soft <= hard <= 86400。后者是提示词约束，不能保证项目记忆隔离。旧 get_query_result 保留 include_content、include_outputs、compact、content_format；REST 默认完整纯文本，旧 MCP 默认 compact=true、Markdown、不重复 outputs。wait_query 返回 cursor 和累计快照，正文应替换，不能拼接。
 
-常见图片不超过 4 MiB 时，`read_artifact` 返回 MCP ImageContent；`inline_image=false` 强制使用 `ego-artifact://...` ResourceLink。MCP `resources/read` 沿用当前连接认证返回原文件字节，stdio 代理也转发资源模板和读取；资源协议 MIME 为 application/octet-stream，实际 MIME 见产物元数据。HTTP 下载支持 GET、HEAD 和 Range；需同一调用方的 Bearer token，不将 token 放入 URL。signed source URL、内部磁盘路径和浏览器认证头不回传。
+旧结果含 generation_complete、delivery_complete、complete、result_is_partial、result 等字段；COMPLETED 且 complete=true 才算交付。旧错误沿用 error_code、message、stage 等结构。REST read_artifact 返回文件元数据；MCP read_artifact 保持原生图片或 ResourceLink。
 
-普通外链保持为链接，不自动抓取任意地址。可见音视频、Canvas、iframe 或大 SVG 等尚未实现的原始导出会列入 unsupported_outputs，提供需 ChatGPT 登录的查看位置，交付完整性为 false。
+每身份最多 100 条等待消息，研究提交和 MCP 请求体上限 56 MiB，其他普通 API 上限 1 MiB。文件可用后才发布下载地址；默认单文件上限 50 MiB。资源通过同一 MCP 认证读取，HTTP 下载支持 HEAD/Range。外链不自动下载，音视频等不支持的原始输出会标记未完整交付。
 
 ## WebUI 边界
 
@@ -98,9 +94,3 @@ WebUI 的「新建研究」和「在此会话继续研究」可选本机文件�
 CLI `download artifact_id --output path` 使用同一认证，验证大小及 SHA-256 后原子发布文件，不覆盖已有目标。普通 call 和 download 可用 EGO_BRIDGE_URL／EGO_BRIDGE_TOKEN 环境变量（HTTPS 才需额外的 CA 配置）作为独立 LAN 客户端；不需要服务端数据库。
 
 主 token 的 UI 会话另有 `/ui/api/exports`，输入实际 ChatGPT 对话 URL，异步只读打包为 ZIP。它不受普通查询的固定專案限制，**没有对应 MCP 工具、普通 `/api/` 工具或 CLI 导出命令**。仅持有 Bearer 而没有 UI 登录 cookie 不能直接调用该入口。额外 Agent 身份不能执行账户级调试导出。
-
-## 错误
-
-错误含 error_code、message、stage、query_id、request_id、retryable、safe_to_retry、user_action_required、diagnostic_context、recovery_suggestion。已受理任务的失败由状态与 last_error 表达；参数错误返回 ok=false。MCP 调用方应检查 structuredContent 的 ok／status，不能只检查 isError。
-
-下载与模型消息的重试是两类操作。OUTCOME_UNKNOWN 不允许强制重发；collect_artifacts 只重新取得输出字节。取消不承诺撤回已发送输入。网页只提供 UI 模型核验，不承诺实际后端型号。

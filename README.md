@@ -56,16 +56,26 @@ ZIP 包含 Markdown／JSON 对话、可取得的原始产物和完整性清单�
 
 MCP Streamable HTTP：`http://<已配置地址>:8766/mcp`。HTTP 工具：`POST /api/<tool_name>`。需要 `Authorization: Bearer <token>`。在 WebUI 的“MCP 接入”复制配置即可，无需 CA 导入。
 
+默认 MCP 只有七个工具：`ask`、`wait`、`get`、`list`、`read_artifact`、`cancel`、`diagnose`。最短路径：
+
+```json
+{"tool":"ask","arguments":{"text":"比较两个候选方案并注明来源。","wait_seconds":120}}
+```
+
+返回 `running` 时按 `next` 调用 `wait`（默认 120 秒，上限 300 秒）；有 progressToken 时约每 10 秒发送进度。`done` 直接带 Markdown 正文和文件，不必再 get。追问用 `ask(query_id="q_...", text="继续比较成本。")`。服务端自动核对发送结果和补收文件；`needs_you` 时按 `problem.what_to_do` 处理。
+
+request_id 可省略：同身份、同输入 query_id、相同文本和附件 SHA-256，复用未终止或 10 分钟内创建的操作。显式 request_id 沿用永久幂等键语义。`get(verbose=true)` 可查看完整旧记录。详情见 [Agent 使用说明](docs/agent-guide.md)。
+
+兼容：config.json 中 `mcp_legacy_tools=true` 才额外显示旧 MCP 工具，默认 false；REST、WebUI、CLI 始终支持旧名字。旧 CLI 等待行为保持不变：
+
 ```sh
-APP="$HOME/apps/ego-chatgpt-bridge"
-"$APP/.venv/bin/ego-bridge" call create_query --json '{"text":"比较两个候选方案并注明来源。","request_id":"research-001"}' --wait
-"$APP/.venv/bin/ego-bridge" call continue_query --json '{"query_id":"q_...","text":"继续比较成本。","request_id":"research-002"}' --wait
-"$APP/.venv/bin/ego-bridge" call get_query_result --json '{"query_id":"q_..."}'
+ego-bridge call create_query --json '{"text":"比较两个候选方案并注明来源。","request_id":"research-001"}' --wait
 ```
 
 CLI 原始文件下载（不会覆盖已有文件，校验大小和 SHA-256）：
 
 ```sh
+APP="$HOME/apps/ego-chatgpt-bridge"
 "$APP/.venv/bin/ego-bridge" download art_... --output ./report.pdf
 ```
 
@@ -73,7 +83,7 @@ CLI 原始文件下载（不会覆盖已有文件，校验大小和 SHA-256）�
 
 stdio 客户端使用 `~/apps/ego-chatgpt-bridge/.venv/bin/ego-bridge stdio`，共用后台服务，不创建第二个浏览器执行器。
 
-新建研究和追问可在 WebUI 选择附件，也可通过 `create_query` / `continue_query` 的 `attachments` 参数提交。每轮最多 4 个文件，合计 40 MiB。格式见 [研究附件](docs/api.md#研究附件)。
+新建研究和追问可在 WebUI 选择附件，也可通过 `ask` 的 `attachments` 参数提交。每轮最多 4 个文件，合计 40 MiB。格式见 [研究附件](docs/api.md#研究附件)。
 
 `--wait` 只是等待；退出客户端不取消后台任务。每个调用身份只能访问自己的任务和产物。主身份可通过 WebUI 执行账户级调试导出，额外 Agent 身份没有该权限。
 
@@ -83,7 +93,7 @@ stdio 客户端使用 `~/apps/ego-chatgpt-bridge/.venv/bin/ego-bridge stdio`，�
 
 ## 产物交付
 
-结果分开返回 `generation_complete`、`delivery_complete` 和 `complete`。文字结束不等于文件可下载。
+MCP v2 仅在生成和文件均完整后返回 `done`。旧版完整记录保留 `generation_complete`、`delivery_complete` 和 `complete`。文字结束不等于文件可下载。
 
 - 文字与普通网页链接保持为结构化输出。
 - 文件及图片取得真实字节后才标记 AVAILABLE，返回 MIME、大小、SHA-256 和认证下载地址。
@@ -129,7 +139,7 @@ HTTPS 是可选部署方式：主动设置 `tls_enabled=true` 后运行 `renew-t
 
 ## 联网研究与分段输出
 
-支持长提示词与联网研究的逐段正文读取。创建请求后使用 `wait_query`（最长30秒、携带上次 cursor）等待变化，再用 `get_query_result` 读取 `result.content` 的累计快照并遵循 `next_action`；`result_is_partial=true` 时继续等待，`complete=true` 才是完整交付。`health_check` 为可选浏览器诊断，发送前会独立核验。空间ID属于服务器，客户端不必也不应据此启动本机Ego。
+支持长提示词与联网研究。Agent 使用 `ask` / `wait` 等待最终回答；WebUI 可用 `get_thread` 一次读取全部轮次及部分 Markdown 快照。浏览器执行发生在服务端。
 
 ## 日志与文件保留
 
@@ -144,6 +154,6 @@ HTTPS 是可选部署方式：主动设置 `tls_enabled=true` 后运行 `renew-t
 
 v0.4.3：完成判定要求整轮 `complete`、无停止生成按钮、产物渲染就绪，并跨至少两次观察保持内容/产物描述不变（默认至少4秒）。`generation_done` 只说明网页标记结束，`extraction_stable` 表示已通过上述确认；`complete` 仍不是研究质量验收，`semantic_validation=not_performed`。正文提取提供 Markdown 表格/内联链接及 DOM 字数、块 ID、anchor 数和覆盖范围证据。仅覆盖当前可见回答 DOM，不保证未渲染/虚拟分页内容不存在。
 
-`get_query_result` MCP 默认 Markdown、精简元数据、不重复 `outputs`；REST 为兼容保留旧默认，可传 `content_format="markdown", compact=true, include_outputs=false`。`include_content=false` 可只取状态。`wait_query` 返回变更 cursor，未变不重复正文；变化正文是替换快照，非 append delta。MCP 的 JSON 文本与 structuredContent 为兼容均保留，客户端只消费其中一种。
+MCP v2 默认返回精简状态和 Markdown；结构化客户端只读 structuredContent，纯文本客户端只读 content。旧 `get_query_result` / `wait_query` 的参数和快照语义见 [兼容接口](docs/api.md#兼容工具)。
 
 `context_mode="request_only_best_effort"` 可用于创建/追加，附加仅依据本条请求和核验来源的范围约束。固定专案指令和记忆仍可能参与，不能保证真正隔离。健康检查使用独立临时页，`health` 分别返回 probe、worker、submission_blocked_by_probe 和最近核验页面；不再复用旧的卡死专案页或活动研究页。
