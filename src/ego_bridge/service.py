@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
+from uuid import uuid4
 from urllib.parse import urlparse
 
 from .model import ACTIVE, TERMINAL, BridgeError, Settings, now, provisional_conversation
@@ -382,7 +383,7 @@ class Service:
                 if not args["page_label"]:
                     args["page_label"] = previous["page_label"]
             attachments = op['payload'].get('attachments', [])
-            attachment_names = [file['filename'] for file in attachments]
+            attachment_names = []
             with contextlib.ExitStack() as staging:
                 if attachments:
                     directory = Path(staging.enter_context(tempfile.TemporaryDirectory(prefix='research-input-', dir=self.settings.runtime)))
@@ -393,10 +394,12 @@ class Service:
                         data = uploads.get(name)
                         if data is None or hashlib.sha256(data).hexdigest() != file['sha256']:
                             raise BridgeError('ATTACHMENT_DATA_MISSING', '暂存附件缺失或校验失败；未发送。', stage='prepare', action=True)
-                        path = directory/name
+                        # Ego may rename repeated basenames during its file transfer.
+                        path = directory/(uuid4().hex+'-'+name)
                         path.write_bytes(data)
                         path.chmod(0o600)
                         args['attachment_paths'].append(str(path))
+                        attachment_names.append(path.name)
                     args['attachment_names'] = attachment_names
                 prepared = await self.adapter.call("prepare", **args)
             self.store.db.execute('UPDATE queries SET space_id=?,updated_at=? WHERE id=?',(self.settings.space_id,now(),op['query_id']))

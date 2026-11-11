@@ -342,7 +342,19 @@ async function main() {
   if(input.action==='prepare') {
     if(!input.conversation_url&&(s.identity.conversation||s.turns.length)) fail('CONVERSATION_MISMATCH','新查询只能从空的项目输入页发起，不能追加到未绑定的会话。','prepare');
     if(s.turns.some(t=>t.state!=='complete')) fail('CONVERSATION_BUSY','页面中存在尚未完成的消息。','prepare');
-    if(s.draft_attachments.length||s.draft_uploading) fail('DRAFT_ATTACHMENTS_PRESENT','输入框已有附件。请核对并清理草稿后重试。','prepare');
+    if(s.draft_attachments.length||s.draft_uploading) {
+      if(norm(s.draft)!==norm(input.send_text)||!input.attachment_paths?.length||page.openedBy!=='agent')
+        fail('DRAFT_ATTACHMENTS_PRESENT','输入框已有附件。请核对并清理草稿后重试。','prepare');
+      // Only this operation's nonce-bearing, unsent draft can be replaced.
+      for(const name of s.draft_attachments){
+        const label=JSON.stringify('移除 '+name);
+        const button=`button[aria-label=${label}]`;
+        await page.hover(`loc=css:form [data-composer-attachments] *:has(> ${button})`,{label:'Show pending attachment controls'});
+        await page.click('loc=css:form '+button,{label:'Replace this operation attachment'});
+      }
+      s=await state(page);
+      if(s.draft_attachments.length||s.draft_uploading)fail('DRAFT_ATTACHMENTS_PRESENT','旧附件尚未移除，未发送。','prepare');
+    }
     if(norm(s.draft) && norm(s.draft)!==norm(input.send_text)) {
       if(!input.conversation_url&&(input.discardable_drafts??[]).some(d=>norm(d)===norm(s.draft))){
         await page.fill(EDITOR,'');receipt.discarded_unsent_bridge_draft=true;s=await state(page);

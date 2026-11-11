@@ -275,9 +275,10 @@ async def test_attachment_bytes_are_staged_for_prepare_and_released_at_submit(ri
     async def inspect_upload(action, **kwargs):
         if action == 'prepare':
             staged.append(Path(kwargs['attachment_paths'][0]))
-            assert staged[0].name == 'report.txt' and staged[0].read_bytes() == data
+            assert staged[0].name.endswith('-report.txt') and staged[0].read_bytes() == data
+            assert kwargs['attachment_names'] == [staged[0].name]
         if action == 'submit':
-            assert kwargs['attachment_names'] == ['report.txt']
+            assert kwargs['attachment_names'] == [staged[0].name]
             assert not staged[0].exists() and not store.uploads(op_id)
         return await original(action, **kwargs)
 
