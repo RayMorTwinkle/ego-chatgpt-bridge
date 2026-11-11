@@ -8,17 +8,17 @@ const {classifyDownload,downloadAssociation}=new Function(`${definitions};return
 const success=download_url=>({status:'success',file_name:'SKILL.md',download_url});
 for(const url of ['https://chatgpt.com/backend-api/estuary/content?sig=private','https://files.oaiusercontent.com/a','https://chatgpt.com:443/a'])test(`trusted absolute ${new URL(url).hostname}`,()=>assert.equal(classifyDownload(success(url)).url,new URL(url).href));
 test('trusted relative paths resolve',()=>{
-  for(const path of ['/backend-api/estuary/content?sig=private','/backend-api/files/download/abc'])assert.equal(classifyDownload(success(path)).url,'https://chatgpt.com'+path);
+  for(const path of ['/backend-api/estuary/content?sig=private','/backend-api/files/download/abc','/backend-api/conversation/6af3c14a-b034-83e8-84be-ae22f08e9e1c/executor/file?path=SKILL.md&sig=private'])assert.equal(classifyDownload(success(path)).url,'https://chatgpt.com'+path);
 });
 for(const [data,status,code] of [
   [success(''),200,'ARTIFACT_URL_MISSING'],[success('  '),200,'ARTIFACT_URL_MISSING'],[{status:'success'},200,'ARTIFACT_URL_MISSING'],
   [{status:'error',error_code:'ace_pod_expired'},200,'ARTIFACT_POD_EXPIRED'],[{status:'error',error_code:'unknown'},200,'ARTIFACT_PROVIDER_ERROR'],
   [{detail:'Library file not found'},404,'ARTIFACT_REFERENCE_NOT_FOUND'],[null,429,'ARTIFACT_HTTP_TRANSIENT'],[null,503,'ARTIFACT_HTTP_TRANSIENT'],
   [null,200,'ARTIFACT_URL_MALFORMED'],[success('broken'),200,'ARTIFACT_URL_MALFORMED'],
-  ...['https://evil.example/a','https://user:password@chatgpt.com/a','https://chatgpt.com:444/a','http://chatgpt.com/a','//evil.example/a','/backend-api/estuary/content-evil'].map(url=>[success(url),200,'ARTIFACT_RESOURCE_UNTRUSTED'])
+  ...['https://evil.example/a','https://user:password@chatgpt.com/a','https://chatgpt.com:444/a','http://chatgpt.com/a','//evil.example/a','/backend-api/estuary/content-evil','/backend-api/conversation/x/executor/file','/backend-api/conversation/6af3c14a-b034/executor/file-evil'].map(url=>[success(url),200,'ARTIFACT_RESOURCE_UNTRUSTED'])
 ])test(`classifies ${code} ${data?.download_url??status}`,()=>{
   const result=classifyDownload(data,status);assert.equal(result.code,code);
-  assert.deepEqual(Object.keys(result.context).sort(),['http_status','provider_status','provider_error_code','download_url_kind','url_host','metadata_keys'].sort());
+  assert.deepEqual(Object.keys(result.context).filter(k=>k!=='url_path_shape').sort(),['http_status','provider_status','provider_error_code','download_url_kind','url_host','metadata_keys'].sort());
   assert.doesNotMatch(JSON.stringify(result.context),/password|sig=private/);
 });
 test('request association accepts missing filename only with matching assistant ID',()=>{
@@ -28,7 +28,7 @@ test('request association accepts missing filename only with matching assistant 
   assert.equal(downloadAssociation(null,null,{},'SKILL.md'),false);
 });
 
-async function runCapture(sequence,{fetchThrows=false,assistantId='a'}={}){
+async function runCapture(sequence,{fetchThrows=false,assistantId='a',download=null}={}){
   const dir=await mkdtemp(tmpdir()+'/bridge-capture-'),destination=dir+'/file';
   let clicks=0,polled=false,disabled=false,clock=0;
   const nativeDate=Date;
@@ -47,6 +47,10 @@ async function runCapture(sequence,{fetchThrows=false,assistantId='a'}={}){
     cdp:async(method,{requestId}={})=>{
       if(method==='Network.disable')disabled=true;
       if(method==='Network.getResponseBody')return {body:requestId==='asset'?'file bytes':JSON.stringify(sequence[clicks-1][Number(requestId)].data)};
+    },
+    waitForEvent:async()=>{
+      if(!download||clicks+1!==download.onClick)return new Promise(()=>{});
+      return {suggestedFilename:()=>download.name,saveAs:async path=>{const {writeFile}=await import('node:fs/promises');await writeFile(path,download.bytes);}};
     },
     fetch:async()=>{if(fetchThrows)throw Error('https://signed.example/?secret=private');return {ok:false};}
   };
@@ -83,4 +87,16 @@ test('pod expiration and missing reference recover with fresh UI metadata',async
 test('provider failure without filename stops immediately',async()=>{
   const r=await runCapture([[{messageId:'a',data:{status:'error',error_code:'unexpected'}}]]);
   assert.equal(r.clicks,1);assert.equal(r.error.code,'ARTIFACT_PROVIDER_ERROR');
+});
+test('relative path shape masks ids and drops the query',()=>{
+  const {context}=classifyDownload(success('/backend-api/conversation/6af3c14a-b034-83e8-84be-ae22f08e9e1c/executor/file?sig=private'));
+  assert.equal(context.url_path_shape,'/backend-api/conversation/:id/executor/file');
+});
+test('takes the browser download the UI triggers, even when our own fetch is unauthorized',async()=>{
+  const r=await runCapture([[{messageId:'a',data:success('/backend-api/conversation/6af3c14a-b034-83e8-84be-ae22f08e9e1c/executor/file?p=1')}]],{download:{onClick:1,name:'SKILL.md',bytes:'blob bytes'}});
+  assert.equal(r.clicks,1);assert.equal(r.bytes,'blob bytes');assert.equal(r.result.transport,'ui_browser_download');
+});
+test('ignores a browser download for a different file name',async()=>{
+  const r=await runCapture([[{messageId:'a',data:success('https://chatgpt.com/a'),asset:true}]],{download:{onClick:1,name:'other.md',bytes:'wrong'}});
+  assert.equal(r.bytes,'file bytes');assert.equal(r.result.transport,'ui_download_response');
 });

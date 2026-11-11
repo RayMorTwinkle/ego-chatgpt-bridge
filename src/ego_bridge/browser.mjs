@@ -194,7 +194,9 @@ function classifyDownload(data,httpStatus=200) {
   if(kind==='missing'||kind==='empty')return error('ARTIFACT_URL_MISSING');
   if(typeof raw!=='string')return error('ARTIFACT_URL_MALFORMED');
   if(kind==='relative'){
-    if(!/^\/backend-api\/(?:estuary\/content(?:[?]|$)|files\/download\/)/.test(raw))return error('ARTIFACT_RESOURCE_UNTRUSTED');
+    // Path shape only: id-like segments masked, query (signature) dropped.
+    context.url_path_shape=raw.split(/[?#]/)[0].slice(0,200).replace(/[A-Za-z0-9_-]{16,}/g,':id');
+    if(!/^\/backend-api\/(?:estuary\/content(?:[?]|$)|files\/download\/|conversation\/[A-Za-z0-9-]{8,64}\/executor\/file(?:[?]|$))/.test(raw))return error('ARTIFACT_RESOURCE_UNTRUSTED');
     try {url=new URL(raw,'https://chatgpt.com');} catch {}
   }
   if(!url)return error('ARTIFACT_URL_MALFORMED');
@@ -258,9 +260,13 @@ async function capture(page) {
       for(let attempt=1;attempt<=3&&Date.now()<budget;attempt++){
         diagnostic={...classifyDownload(null,null).context,attempt,elapsed_ms:Date.now()-started};
         await page.events();
+        // The UI saves files as a real browser download (often a blob: built with its own auth);
+        // taking that download is the same path as a person clicking, and needs no headers from us.
+        let browserDownload=null;
+        page.waitForEvent('download',{timeout:Math.max(1000,Math.min(budget,Date.now()+45000)-Date.now())}).then(d=>{browserDownload=d;},()=>{});
         await page.click(`loc=css:[data-ego-download="${token}"]`);
         const responses=new Map(),requests=new Map(),finished=new Set(),checked=new Set();
-        let metadata,resourceUrl,resourceFetchAttempted=false,failure,retryAfter=2000;
+        let metadata,resourceUrl,metadataAt=0,resourceFetchAttempted=false,failure,retryAfter=2000;
         let deadline=Math.min(budget,Date.now()+12000);
         while(Date.now()<deadline&&!failure){
           for(const event of await page.events()){
@@ -305,10 +311,26 @@ async function capture(page) {
               }
               break;
             }
-            metadata=data;resourceUrl=classified.url;deadline=Math.min(budget,Date.now()+30000);
+            metadata=data;resourceUrl=classified.url;metadataAt=Date.now();deadline=Math.min(budget,Date.now()+30000);
+          }
+          if(browserDownload){
+            const download=browserDownload;browserDownload=null;
+            if(download.suggestedFilename()===c.name){
+              await download.saveAs(input.destination);
+              const stat=await fs.stat(input.destination).catch(()=>null);
+              if(stat?.size>0){
+                if(Number.isFinite(metadata?.file_size_bytes)&&metadata.file_size_bytes>0&&metadata.file_size_bytes!==stat.size)artifactFail('ARTIFACT_INCOMPLETE','文件字节数与非零下载元数据不一致。');
+                return {saved:true,transport:'ui_browser_download',size_bytes:stat.size,mime_type:metadata?.mime_type??null,provider_size_bytes:metadata?.file_size_bytes??null};
+              }
+            }
           }
           if(metadata){
-            if(!resourceFetchAttempted){
+            const samePath=url=>{try {const a=new URL(url),b=new URL(resourceUrl);return a.origin===b.origin&&a.pathname===b.pathname;} catch {return false;}};
+            const seen=Array.from(responses.entries()).filter(([id,r])=>samePath(r.url)&&finished.has(id));
+            diagnostic.resource_statuses=seen.map(([,r])=>r.status).slice(0,6);
+            const uiResource=seen.find(([,r])=>r.status===200);
+            if(!resourceFetchAttempted&&!uiResource&&Date.now()-metadataAt<8000){await new Promise(r=>setTimeout(r,150));continue;}
+            if(!resourceFetchAttempted&&!uiResource){
               resourceFetchAttempted=true;
               let fetched;
               try {fetched=await page.fetch(resourceUrl,{saveAs:input.destination});} catch {}
@@ -318,7 +340,7 @@ async function capture(page) {
                 return {saved:true,transport:'ui_download_asset_url',size_bytes:stat.size,mime_type:fetched.headers?.['content-type']??metadata.mime_type,provider_size_bytes:metadata.file_size_bytes};
               }
             }
-            const resource=Array.from(responses.entries()).find(([id,r])=>r.url===resourceUrl&&finished.has(id));
+            const resource=uiResource??(resourceFetchAttempted&&Date.now()-metadataAt>15000?seen[0]:null);
             if(resource){
               const [id,r]=resource;
               if(r.status!==200)artifactFail('ARTIFACT_DOWNLOAD_FAILED',`网页下载返回 HTTP ${r.status}。`);
