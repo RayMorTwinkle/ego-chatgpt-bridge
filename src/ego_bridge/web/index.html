@@ -29,7 +29,7 @@
   <aside class="sidebar">
     <div class="sidebar-head">
       <p class="wordmark">Ego 研究</p>
-      <button id="new-open" class="new-button" title="新研究（N）">＋ 新研究</button>
+      <button id="new-open" class="new-button" title="新研究">新研究<kbd>N</kbd></button>
     </div>
     <div class="search"><input id="search" type="search" placeholder="搜索" aria-label="搜索研究"></div>
     <nav id="task-list" class="task-list" aria-label="研究列表" aria-live="polite"></nav>
@@ -45,7 +45,7 @@
     <section id="thread-view" class="thread-view">
       <header id="thread-head" class="thread-head" hidden>
         <button id="back" class="icon-button back" aria-label="返回列表">‹</button>
-        <div class="thread-title"><h1 id="thread-title"></h1><span id="thread-status" class="status-text"></span></div>
+        <div class="thread-title"><span id="thread-title"></span><span id="thread-status" class="status-text"></span></div>
         <div class="thread-actions">
           <a id="conversation-link" class="quiet-link" target="_blank" rel="noopener noreferrer" hidden>在 ChatGPT 打开 ↗</a>
           <button id="diagnose" class="quiet-link" title="诊断记录">诊断</button>
@@ -53,22 +53,25 @@
       </header>
 
       <div id="scroller" class="scroller">
-        <div id="welcome" class="welcome" hidden>
-          <h1>想研究什么？</h1>
-          <p class="muted">在服务端的 ChatGPT 项目里用 GPT-6 深度思考。一次研究可能要十几分钟，可以关掉页面，回答和文件都会留在这里。</p>
+        <div class="doc">
+          <div id="welcome" class="draft-head" hidden>
+            <p class="section-label">新研究</p>
+            <p class="draft-note">写清问题、约束和想要的产物。GPT-6 在服务端的 ChatGPT 项目里深度思考，一次可能要十几分钟；可以关掉页面，回答和文件都会留在这里。</p>
+          </div>
+          <h1 id="doc-title" class="doc-title" hidden></h1>
+          <div id="thread" class="thread"></div>
         </div>
-        <div id="thread" class="thread"></div>
       </div>
 
       <form id="composer" class="composer" hidden>
         <div class="composer-box">
           <div id="file-chips" class="file-chips" hidden></div>
-          <textarea id="prompt" rows="1" placeholder="描述问题、约束和希望得到的产物" aria-label="研究问题"></textarea>
+          <textarea id="prompt" rows="1" placeholder="继续追问" aria-label="研究问题"></textarea>
           <div class="composer-bar">
-            <label class="attach" title="附件：最多 4 个，合计 40 MiB">附件<input type="file" id="files" multiple hidden></label>
+            <label class="attach" title="最多 4 个，合计 40 MiB">添加附件<input type="file" id="files" multiple hidden></label>
             <select id="effort" aria-label="思考强度"><option value="extra_high">极高思考</option><option value="high">高思考</option></select>
-            <span id="composer-hint" class="composer-hint">⌘↵ 发送</span>
-            <button id="send" class="send" type="submit">开始研究</button>
+            <span id="composer-hint" class="composer-hint"><kbd>⌘</kbd><kbd>↵</kbd></span>
+            <button id="send" class="send" type="submit">提交</button>
           </div>
         </div>
       </form>

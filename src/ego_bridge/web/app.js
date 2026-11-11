@@ -37,12 +37,12 @@ function duration(seconds){
 }
 function spoken(seconds){const m=Math.round(seconds/60);return m<1?'不到 1 分钟':m<60?m+' 分钟':Math.floor(m/60)+' 小时 '+(m%60?m%60+' 分':'');}
 // Research prompts often open with a role line ("你是一位……"); the question comes after it.
-function smartTitle(text){
+function smartTitle(text,limit=48){
   if(!text)return '未命名研究';
   let t=text.trim().replace(/^(你是|你现在是|你現在是|作为|作為|请你扮演|請你扮演|扮演)[^。！？\n]{0,90}[。！？\n]\s*/,'');
   t=(t||text).split('\n').find(line=>line.trim())||t;
   t=t.trim().replace(/^[#>*\-\s]+/,'');
-  return t.length>48?t.slice(0,48)+'…':t;
+  return t.length>limit?t.slice(0,limit)+'…':t;
 }
 function titleOf(q){return q?.chat_title||smartTitle(q?.title);}
 
@@ -99,9 +99,9 @@ function showList(){saveDraft();state.query=null;setView('list');renderList();}
 function showNew(){
   saveDraft();state.query=null;state.thread=null;setView('new');
   $('thread-view').classList.add('is-new');$('thread-head').hidden=true;$('welcome').hidden=false;
-  $('thread').replaceChildren();$('composer').hidden=false;$('send').textContent='开始研究';
-  $('prompt').placeholder='描述问题、约束和希望得到的产物';
-  restoreDraft('new');renderList();document.title='Ego 研究';
+  $('thread').replaceChildren();$('doc-title').hidden=true;$('composer').hidden=false;$('send').textContent='提交研究';
+  $('prompt').placeholder='写下研究问题……';
+  restoreDraft('new');autosize();renderList();document.title='Ego 研究';
   if(!matchMedia('(max-width:820px)').matches)$('prompt').focus();
 }
 function showExports(){saveDraft();state.query=null;setView('exports');renderList();loadExports().catch(e=>toast(e.message));}
@@ -183,7 +183,7 @@ async function openThread(qid){
   if(switching){saveDraft();state.query=qid;state.thread=null;$('thread').replaceChildren();restoreDraft(qid);}
   setView('thread');
   $('thread-view').classList.remove('is-new');$('welcome').hidden=true;$('thread-head').hidden=false;$('composer').hidden=false;
-  $('send').textContent='追问';$('prompt').placeholder='在同一对话里继续追问';
+  autosize();$('doc-title').hidden=false;$('send').textContent='追问';$('prompt').placeholder='继续追问，沿用同一对话的上下文';
   renderList();renderHead();
   try{
     const thread=await fetchThread(qid,state.thread);
@@ -201,7 +201,9 @@ function currentQuery(){return state.queries.find(q=>q.id===state.query);}
 function renderHead(){
   const q=currentQuery(),t=state.thread,last=t?.rounds.at(-1);
   const title=t?.title||titleOf(q)||(t?.rounds[0]?smartTitle(t.rounds[0].prompt):'研究');
-  $('thread-title').textContent=title;document.title=title+' · Ego 研究';
+  $('thread-title').textContent=title;
+  const full=t?.title||q?.chat_title||smartTitle(t?.rounds[0]?.prompt||q?.title,56);
+  $('doc-title').textContent=full;$('doc-title').classList.toggle('long',full.length>30);document.title=title+' · Ego 研究';
   const status=last?.status||q?.status,k=last?kindOf(last):kind(status);
   const el=$('thread-status');el.className='status-text s-'+k;
   el.textContent=k==='running'?(last?.phase||PHASE[status]||'进行中'):k==='done'?((t?.rounds.length||0)>1?t.rounds.length+' 轮':''):KIND_LABEL[k];
@@ -228,33 +230,43 @@ function renderThread(scrollToLatest){
 
 function renderRound(r){
   const turn=node('article',undefined,'turn'),k=kindOf(r);
-  turn.append(renderAsk(r));
+  turn.append(renderTurnHead(r,k),renderBrief(r));
   if(k==='attention'||k==='failed')turn.append(problemCard(r));
   if(r.answer){const md=node('div',undefined,'answer md');md.append(window.renderMarkdown(r.answer));turn.append(md);}
   else if(k==='running'){
-    const wait=node('div',undefined,'waiting');wait.append(node('span',undefined,'pulse'));
-    const text=node('span',(r.phase||PHASE[r.status]||'进行中')+' · 已用 ');text.append(since(r.created));
-    if(r.retry?.attempts)text.append(' · 自动重试第 '+r.retry.attempts+' 次');
-    wait.append(text);turn.append(wait);
+    const line=node('p',undefined,'status-line');
+    line.append(node('span',r.phase||PHASE[r.status]||'进行中'),node('span','·','sep'),since(r.created));
+    if(r.retry?.attempts)line.append(node('span','·','sep'),node('span','自动重试第 '+r.retry.attempts+' 次'));
+    turn.append(line);
   }else if(k==='done')turn.append(node('p','这一轮没有文字回答。','answer muted'));
   if(r.unsupported.length)turn.append(node('p',r.unsupported.map(o=>o.kind).join('、')+' 这类预览还不能导出原始内容。','notice'));
   if(r.files.length)turn.append(renderFiles(r));
   const sources=[...r.sources,...r.images.map(i=>({...i,title:'引用图片 · '+(i.title||'图片')}))];
   if(sources.length)turn.append(renderSources(sources));
-  turn.append(renderMeta(r,k));
+  const foot=renderFoot(r,k);if(foot.childElementCount)turn.append(foot);
   return turn;
 }
-function renderAsk(r){
-  const ask=node('div',undefined,'ask');ask.append(node('div',r.prompt,'ask-text'));
-  if(r.prompt.split('\n').length>6||r.prompt.length>320){
-    const open=state.expanded.has(r.id);ask.classList.toggle('clamped',!open);
-    ask.append(button(open?'收起':'展开全文','ask-toggle',event=>{
+function renderTurnHead(r,k){
+  const head=node('header',undefined,'turn-head');
+  head.append(node('span',r.seq>1?'追问 · 第 '+r.seq+' 轮':'提问','section-label'));
+  const meta=node('span',undefined,'turn-meta');
+  const parts=[clock(r.created)];
+  if(r.effort)parts.push(EFFORT[r.effort]||r.effort);
+  if(k==='done'&&r.updated&&r.created&&r.updated-r.created<4*3600)parts.push('用时 '+spoken(r.updated-r.created));
+  if(k==='cancelled')parts.push('已取消');
+  meta.textContent=parts.join(' · ');head.append(meta);return head;
+}
+function renderBrief(r){
+  const brief=node('blockquote',undefined,'brief');brief.append(node('div',r.prompt,'brief-text'));
+  if(r.prompt.split('\n').length>5||r.prompt.length>260){
+    const open=state.expanded.has(r.id);brief.classList.toggle('clamped',!open);
+    brief.append(button(open?'收起':'展开全文','brief-toggle',event=>{
       const now=!state.expanded.has(r.id);now?state.expanded.add(r.id):state.expanded.delete(r.id);
-      ask.classList.toggle('clamped',!now);event.target.textContent=now?'收起':'展开全文';
+      brief.classList.toggle('clamped',!now);event.target.textContent=now?'收起':'展开全文';
     }));
   }
-  if(r.attachments.length){const files=node('div',undefined,'ask-files');for(const f of r.attachments)files.append(node('span',f.filename+' · '+size(f.size_bytes),'chip'));ask.append(files);}
-  return ask;
+  if(r.attachments.length){const files=node('div',undefined,'brief-files');for(const f of r.attachments)files.append(node('span',f.filename+' · '+size(f.size_bytes),'chip'));brief.append(files);}
+  return brief;
 }
 function since(start){const s=node('span',duration(Date.now()/1000-start));s.dataset.since=start;return s;}
 function tick(){for(const el of document.querySelectorAll('[data-since]'))el.textContent=duration(Date.now()/1000-Number(el.dataset.since));}
@@ -313,24 +325,18 @@ function renderSources(sources){
   }
   details.append(ol);return details;
 }
-function renderMeta(r,k){
-  const meta=node('div',undefined,'turn-meta');
+function renderFoot(r,k){
+  const foot=node('footer',undefined,'turn-foot');
   if(k==='running'){
-    const live=node('span',undefined,'live');
-    live.append((r.answer?(r.phase||PHASE[r.status]||'生成中')+' · '+(r.progress?.answer_characters||r.answer.length).toLocaleString()+' 字 · ':'')+'已用 ',since(r.created));
-    meta.append(live,button('停止',undefined,event=>act('cancel_query',r,event.target)));
-    return meta;
+    if(r.answer){const live=node('span',undefined,'live');live.append((r.phase||PHASE[r.status]||'生成中')+' · '+(r.progress?.answer_characters||r.answer.length).toLocaleString()+' 字 · ',since(r.created));foot.append(live);}
+    foot.append(button('停止',undefined,event=>act('cancel_query',r,event.target)));
+    return foot;
   }
-  meta.append(node('span',clock(r.updated||r.created)));
-  if(r.effort)meta.append(node('span','·','sep'),node('span',EFFORT[r.effort]||r.effort));
-  if(k==='done'&&r.updated&&r.created)meta.append(node('span','·','sep'),node('span','用时 '+spoken(r.updated-r.created)));
-  if(k==='cancelled')meta.append(node('span','·','sep'),node('span','已取消'));
   if(r.answer){
-    meta.append(node('span','','sep'));
-    meta.append(button('复制',undefined,()=>copyText(r.answer).then(()=>toast('已复制回答。'))));
-    meta.append(button('下载 .md',undefined,()=>downloadMarkdown(r)));
+    foot.append(button('复制',undefined,()=>copyText(r.answer).then(()=>toast('已复制回答。'))));
+    foot.append(button('下载 Markdown',undefined,()=>downloadMarkdown(r)));
   }
-  return meta;
+  return foot;
 }
 async function act(name,r,el){
   if(el)el.disabled=true;
