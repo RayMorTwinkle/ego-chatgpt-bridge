@@ -57,10 +57,11 @@ class AgentView:
         if files:output['files']=files
         sources=list(dict.fromkeys(s if isinstance(s,str) else s['url'] for s in result.get('sources',[]) if isinstance(s,str) or s.get('url')))
         if sources:output['sources']=sources
+        if result.get('delivery_notes'):output['delivery_notes']=result['delivery_notes']
         if status in {'needs_you','failed'}:
             error=value.get('last_error') or {}
             code=error.get('error_code','INCOMPLETE_RESULT');attempts=retry.get('attempts',0)
-            action=(f'回答已生成，文件补收 {attempts} 次失败；可在 WebUI 重新收集文件。' if code=='ARTIFACT_CAPTURE_FAILED'
+            action=(f'回答已生成，文件补收 {attempts} 次失败；可在 WebUI 重新收集文件。' if code.startswith('ARTIFACT_')
                     else f'服务端已自动重试 {attempts} 次仍失败；修好浏览器/登录问题后可在 WebUI 点重试，或调用旧接口 retry_query。'
                     if error.get('safe_to_retry') and attempts>=retry.get('max',3) and retry.get('next_at') is None
                     else '需要在服务端完成登录或验证。' if code in {'LOGIN_REQUIRED','VERIFICATION_REQUIRED'}

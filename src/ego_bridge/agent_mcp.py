@@ -17,6 +17,7 @@ def done_text(value):
     # Text-only clients still need the ids to follow up and fetch files.
     lines=[value.get('answer',''),'','---',f"query_id: {value['query_id']} · 第 {value['round']} 轮 · 追问用 ask(query_id=...)"]
     lines+=[f"文件：{f['filename']}（{f['artifact_id']}，用 read_artifact 读取）" for f in value.get('files',[])]
+    lines+=value.get('delivery_notes',[])
     if value.get('sources'):lines.append('来源：'+' '.join(value['sources'][:20]))
     return '\n'.join(lines)
 

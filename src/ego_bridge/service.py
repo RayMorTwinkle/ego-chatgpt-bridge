@@ -596,7 +596,7 @@ class Service:
             if stable:
                 result=await self.package_result(op,turn,result)
                 error=None if result['delivery_complete'] else BridgeError('ARTIFACT_CAPTURE_FAILED','回答已生成，部分产物尚未得到可回传内容；无需重新发送问题。',stage='artifact',action=True).data
-                retrying=bool(error and not result.get('unsupported_outputs') and self.schedule_retry(self.store.operation(op['id']),error,'artifact'))
+                retrying=bool(error and self.schedule_retry(self.store.operation(op['id']),error,'artifact'))
                 if retrying:error['user_action_required']=False
                 if result['delivery_complete']:self.clear_retry_due(self.store.operation(op['id']))
                 self.store.transition(op["id"], "COMPLETED" if result['delivery_complete'] else 'GENERATING' if retrying else 'NEEDS_ATTENTION', result=result,error=error)
@@ -636,11 +636,17 @@ class Service:
         result['external_images']=turn.get('external_images',[])
         changed=self.artifacts.reconcile_external_references(op,result['external_images'])
         if changed:result['delivery_notes']=[f'{changed} 个历史外部图片条目已更正为引用内容；未缓存第三方图片，不伪造图片字节或下载链接。']
-        manifest=await self.artifacts.collect(op,turn.get('artifacts',[]),self.adapter,self.browser_args(op),turn['user_id'])
+        manifest=await self.artifacts.collect(op,turn.get('artifacts',[]),self.adapter,self.browser_args(op),turn['user_id'],turn.get('assistant_id'))
         result['artifacts']=manifest
         result['unsupported_outputs']=turn.get('unsupported_outputs',[])
         result['conversation_view_url']=self.store.query(op['owner'],op['query_id'])['conversation_url']
-        result['delivery_complete']=all(a['status']=='AVAILABLE' for a in manifest) and not result['unsupported_outputs']
+        result['delivery_complete']=all(a['status']=='AVAILABLE' for a in manifest)
+        notes=[n for n in result.get('delivery_notes',[]) if '无法导出' not in n]
+        for kind in dict.fromkeys(item.get('kind','output') for item in result['unsupported_outputs']):
+            count=sum(item.get('kind','output')==kind for item in result['unsupported_outputs'])
+            label={'mermaid':'Mermaid 图表','svg':'SVG 图像'}.get(kind,'内容')
+            notes.append(f'回答含 {count} 个无法导出的 {label}，请在原对话查看。')
+        result['delivery_notes']=notes
         result['artifact_discovery']='rendered_ui_only'
         result['delivery_phase']='AVAILABLE' if result['delivery_complete'] else 'PARTIAL'
         result['outputs']=self.outputs(result)

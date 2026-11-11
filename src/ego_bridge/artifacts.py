@@ -126,7 +126,7 @@ class Artifacts:
             raise
         return row, path
 
-    async def collect(self, op: dict, candidates: list[dict], adapter, browser_args: dict, user_message_id: str) -> list[dict]:
+    async def collect(self, op: dict, candidates: list[dict], adapter, browser_args: dict, user_message_id: str, assistant_message_id: str | None = None) -> list[dict]:
         for candidate in candidates:
             key = digest({k: candidate.get(k) for k in ("kind", "name", "index")})
             row = self.store.db.execute("SELECT * FROM artifacts WHERE operation_id=? AND source_key=?", (op["id"], key)).fetchone()
@@ -153,7 +153,7 @@ class Artifacts:
                 if not destination.exists():
                     temporary.unlink(missing_ok=True)
                     self.store.db.execute("UPDATE artifacts SET status='DOWNLOADING',updated_at=? WHERE id=?", (now(), row["id"]))
-                    capture_receipt=await adapter.call("capture_artifact", **browser_args, user_message_id=user_message_id, candidate=candidate, destination=str(temporary.resolve()))
+                    capture_receipt=await adapter.call("capture_artifact", **browser_args, user_message_id=user_message_id, assistant_message_id=assistant_message_id, candidate=candidate, destination=str(temporary.resolve()))
                     if candidate['kind']=='inline_image':
                         extension={'image/png':'.png','image/jpeg':'.jpg','image/gif':'.gif','image/webp':'.webp'}.get(capture_receipt.get('mime_type'))
                         if extension:

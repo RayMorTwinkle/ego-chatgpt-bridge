@@ -375,3 +375,20 @@ async def test_mcp_ask_attachments_and_rest_new_names(tmp_path):
                     assert duplicate['message_id']==a['message_id'] and 'submission_trace' not in duplicate
                     status=(await http.post('https://localhost/api/get',json={'query_id':qid})).json()
                     assert status['status'] in {'running','done'}
+
+
+@pytest.mark.parametrize('kind',['mermaid','svg'])
+async def test_preview_only_answer_completes_compact_tools(rig,kind):
+    from ego_bridge.agent_mcp import envelope
+    s,db,b=rig
+    value=await ask(s)
+    await s.execute(db.operation(value['message_id']))
+    b.pages['p1'][0].update(assistant_text='',regenerate=False,unsupported_outputs=[{'kind':kind,'export_status':'UNSUPPORTED'}])
+    await s.observe(db.operation(value['message_id']))
+    op=db.operation(value['message_id'])
+    assert op['status']=='COMPLETED' and op['result']['delivery_complete']
+    assert op['result']['artifacts']==[] and op['result']['outputs'][0]['type']=='preview'
+    for tool,args in [('get',{}),('wait',{'timeout_seconds':0}),('ask',{'text':'你好，请回答。'})]:
+        result=await s.dispatch('alice',tool,({} if tool=='ask' else {'query_id':value['query_id']})|args)
+        assert result['status']=='done' and result['delivery_notes']
+        assert '无法导出' in envelope(result).content[0].text

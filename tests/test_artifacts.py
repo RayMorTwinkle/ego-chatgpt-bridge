@@ -132,14 +132,15 @@ async def test_image_only_answer_and_download_retry_never_resend_prompt(tmp_path
     store.close()
 
 
-async def test_unexported_media_is_reported_as_partial_not_lost(tmp_path):
+async def test_unexported_media_is_reported_without_blocking_delivery(tmp_path):
     settings=Settings(tmp_path,completion_confirm_seconds=0);store=Store(tmp_path);browser=FileBrowser();s=Service(settings,store,browser)
     task=await s.dispatch('alice','create_query',{'text':'Create video','request_id':'video'})
     await s.execute(store.operation(task['message_id']))
     browser.pages['p1'][0].update(assistant_text='',regenerate=False,unsupported_outputs=[{'kind':'video','export_status':'UNSUPPORTED'}])
     await s.observe(store.operation(task['message_id']))
     result=await s.dispatch('alice','get_query_result',{'query_id':task['query_id']})
-    assert result['generation_complete'] and not result['delivery_complete'] and not result['complete']
+    assert result['generation_complete'] and result['delivery_complete'] and result['complete']
+    assert result['status']=='COMPLETED' and result['result']['delivery_notes']
     assert result['result']['outputs'][0]['type']=='preview'
     store.close()
 
@@ -211,4 +212,23 @@ async def test_automatic_artifact_retry_can_finish_without_operator(tmp_path,mon
     await service.observe(store.operation(mid))
     assert store.operation(mid)['status']=='COMPLETED' and len(browser.sent)==1
     assert store.operation(mid)['auto_retry']['next_at'] is None
+    store.close()
+
+
+@pytest.mark.parametrize('code',['ARTIFACT_URL_MISSING','ARTIFACT_URL_MALFORMED','ARTIFACT_PROVIDER_ERROR','ARTIFACT_POD_EXPIRED','ARTIFACT_REFERENCE_NOT_FOUND','ARTIFACT_HTTP_TRANSIENT'])
+async def test_capture_error_context_is_stored(tmp_path,code):
+    import json
+    context=dict(http_status=404,provider_status='error',provider_error_code='ace_pod_expired',
+                 download_url_kind='missing',url_host=None,metadata_keys=['status','error_code'],attempt=3,elapsed_ms=4200)
+    class BrokenBrowser:
+        async def call(self,action,**kw):
+            assert kw['assistant_message_id']=='assistant'
+            raise BridgeError(code,'下载失败',stage='artifact',context=context)
+    store=Store(tmp_path);a=Artifacts(Settings(tmp_path),store)
+    op=store.enqueue('alice','r',dict(text='x',effort='extra_high',soft_timeout=1,hard_timeout=2),'p',3)
+    rows=await a.collect(op,[{'kind':'file_card','index':0,'name':'SKILL.md'}],BrokenBrowser(),{},'user','assistant')
+    assert rows[0]['status']=='FAILED' and rows[0]['error']['error_code']==code
+    assert rows[0]['error']['diagnostic_context']==context
+    saved=json.loads(store.db.execute('SELECT error FROM artifacts').fetchone()[0])
+    assert saved==rows[0]['error']
     store.close()

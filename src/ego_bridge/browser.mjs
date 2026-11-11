@@ -35,7 +35,7 @@ async function control(page, kind) {
 const EDITOR = 'loc=css:form [contenteditable="true"]';
 const FILE_INPUT = 'loc=css:form input[type=file][multiple]:is(:not([accept]),[accept=""])';
 const norm = s => String(s ?? '').replace(/\s+/g, ' ').trim();
-const fail = (code, message, stage='browser') => { const e=new Error(message); e.code=code; e.stage=stage; throw e; };
+const fail = (code, message, stage='browser',context={}) => { const e=new Error(message); e.code=code; e.stage=stage; e.diagnostic_context=context; throw e; };
 const identity = url => {
   const u=new URL(url);
   if(u.origin!=='https://chatgpt.com') return {};
@@ -178,97 +178,170 @@ async function modelInfo(page) {
   }),CONTROLS.model);
 }
 
+function classifyDownload(data,httpStatus=200) {
+  const raw=data?.download_url;
+  const kind=raw==null?'missing':typeof raw!=='string'?'other':!raw.trim()?'empty':raw.startsWith('/')?'relative':/^[a-z][a-z0-9+.-]*:/i.test(raw)?'absolute':'other';
+  let url;
+  try {url=new URL(raw);} catch {}
+  const field=value=>typeof value==='string'&&/^[a-z0-9_.-]{1,80}$/i.test(value)?value:null;
+  const context={http_status:httpStatus,provider_status:field(data?.status),provider_error_code:field(data?.error_code),
+    download_url_kind:kind,url_host:url?.hostname??null,metadata_keys:data&&typeof data==='object'?Object.keys(data).filter(k=>/^[a-z_]{1,64}$/i.test(k)).slice(0,40):[]};
+  const error=code=>({code,context});
+  if(httpStatus===404)return error('ARTIFACT_REFERENCE_NOT_FOUND');
+  if(httpStatus===429||httpStatus>=500)return error('ARTIFACT_HTTP_TRANSIENT');
+  if(data?.status==='error')return error(data.error_code==='ace_pod_expired'?'ARTIFACT_POD_EXPIRED':'ARTIFACT_PROVIDER_ERROR');
+  if(!data||typeof data!=='object'||Array.isArray(data))return error('ARTIFACT_URL_MALFORMED');
+  if(kind==='missing'||kind==='empty')return error('ARTIFACT_URL_MISSING');
+  if(typeof raw!=='string')return error('ARTIFACT_URL_MALFORMED');
+  if(kind==='relative'){
+    if(!/^\/backend-api\/(?:estuary\/content(?:[?]|$)|files\/download\/)/.test(raw))return error('ARTIFACT_RESOURCE_UNTRUSTED');
+    try {url=new URL(raw,'https://chatgpt.com');} catch {}
+  }
+  if(!url)return error('ARTIFACT_URL_MALFORMED');
+  context.url_host=url.hostname;
+  if(url.protocol!=='https:'||!(url.hostname==='chatgpt.com'||url.hostname.endsWith('.oaiusercontent.com'))||url.username||url.password||url.port&&url.port!=='443')
+    return error('ARTIFACT_RESOURCE_UNTRUSTED');
+  return {url:url.href,context};
+}
+function downloadAssociation(messageId,assistantId,data,name) {
+  if(assistantId&&messageId)return messageId===assistantId&&(!data?.file_name||data.file_name===name);
+  return data?.file_name===name;
+}
+
 async function capture(page) {
   const fs=await import('node:fs/promises');
-  const c=input.candidate;
-  if(c.kind==='inline_image') {
-    const src=await page.evaluate(({userId,index})=>{
-      const turn=Array.from(document.querySelectorAll('[data-talvt-turn-state]')).find(t=>t.querySelector('[data-chatgpt-search-message-ids]')?.getAttribute('data-chatgpt-search-message-ids')===userId);
-      if(!turn)return null;const user=turn.querySelector('[data-chatgpt-search-message-ids]');
-      const images=Array.from(turn.querySelectorAll('img')).filter(e=>!user?.contains(e)&&e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden'&&!e.closest('[data-markdown-text-tone="tertiary"]')&&e.getBoundingClientRect().width>32&&e.getBoundingClientRect().height>32);
-      return images[index]?.currentSrc||images[index]?.src;
-    },{userId:input.user_message_id,index:c.index});
-    if(!src)fail('ARTIFACT_ASSOCIATION_FAILED','当前回答找不到对应图片。','artifact');
-    const url=new URL(src);
-    if(!['blob:','data:'].includes(url.protocol)&&!(url.protocol==='https:'&&(url.hostname==='chatgpt.com'||url.hostname.endsWith('.oaiusercontent.com'))))
-      fail('EXTERNAL_IMAGE_NOT_COPIED','外部站点图片保留为网页内容，不由服务自动抓取。','artifact');
-    const response=await page.fetch(src,{saveAs:input.destination});
-    const type=response.headers['content-type']??response.headers['Content-Type']??'';
-    if(!response.ok||!/^image\/(png|jpeg|gif|webp)(;|$)/.test(type))fail('ARTIFACT_TYPE_MISMATCH','图片响应状态或 MIME 不符合可回传的图像类型。','artifact');
-    return {saved:true,transport:'rendered_image_url',mime_type:type.split(';')[0]};
-  }
-  if(c.kind!=='file_card') fail('ARTIFACT_CAPTURE_UNSUPPORTED','该产物呈现方式尚未验证可安全导出原始字节。','artifact');
-  const token='artifact-'+Date.now().toString(36);
-  const selected=await page.evaluate(({userId,candidate,token})=>{
-    const turn=Array.from(document.querySelectorAll('[data-talvt-turn-state]')).find(t=>t.querySelector('[data-chatgpt-search-message-ids]')?.getAttribute('data-chatgpt-search-message-ids')===userId);
-    if(!turn)return false;
-    const user=turn.querySelector('[data-chatgpt-search-message-ids]');
-    const previews=Array.from(turn.querySelectorAll('button:is([aria-label^="開啟 "][aria-label$=" 預覽"],[aria-label^="打开 "][aria-label$=" 预览"],[aria-label^="Open "][aria-label$=" preview"])')).filter(e=>!user?.contains(e)&&e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden');
-    const preview=previews[candidate.index];
-    if(!preview||!['開啟 '+candidate.name+' 預覽','打开 '+candidate.name+' 预览','Open '+candidate.name+' preview'].includes(preview.getAttribute('aria-label')))return false;
-    let card=preview.parentElement;
-    while(card&&card!==turn){
-      const downloads=card.querySelectorAll('button:is([data-testid="download-file"],[aria-label="下載檔案"],[aria-label="下载文件"],[aria-label="Download file"])');
-      if(downloads.length===1){preview.setAttribute('data-ego-preview',token);downloads[0].setAttribute('data-ego-download',token);return true;}
-      if(downloads.length>1)return false;
-      card=card.parentElement;
-    }
-    return false;
-  },{userId:input.user_message_id,candidate:c,token});
-  if(!selected)fail('ARTIFACT_ASSOCIATION_FAILED','找不到该消息中对应的唯一文件卡片。','artifact');
-  await page.evaluate(token=>Array.from(document.querySelectorAll('[data-ego-preview]')).find(e=>e.getAttribute('data-ego-preview')===token)?.scrollIntoView({block:'center',inline:'nearest'}),token);
-  await page.hover(`loc=css:[data-ego-preview="${token}"]`);
-  await page.cdp('Network.enable');await page.events();
+  const c=input.candidate,started=Date.now();
+  let diagnostic={...classifyDownload(null,null).context,attempt:0,elapsed_ms:0};
+  const artifactFail=(code,message)=>fail(code,message,'artifact',{...diagnostic,elapsed_ms:Date.now()-started});
   try {
-    await page.click(`loc=css:[data-ego-download="${token}"]`);
-    const responses=new Map(),finished=new Set(),checked=new Set();let metadata,resourceFetchAttempted=false;
-    const deadline=Date.now()+30000;
-    while(Date.now()<deadline){
-      for(const event of await page.events()){
-        if(event.method==='Network.responseReceived')responses.set(event.params.requestId,event.params.response);
-        if(event.method==='Network.loadingFinished')finished.add(event.params.requestId);
-      }
-      for(const [id,response] of responses){
-        if(!finished.has(id)||checked.has(id))continue;
-        // Observe only the actual UI-triggered metadata response. No hidden endpoint
-        // is called/replayed and no cookies, headers or signed URL are exported.
-        if(response.status===200&&response.mimeType==='application/json'&&new URL(response.url).pathname.endsWith('/interpreter/download')){
-          checked.add(id);
-          const body=await page.cdp('Network.getResponseBody',{requestId:id});
-          const data=JSON.parse(body.base64Encoded?Buffer.from(body.body,'base64').toString():body.body);
-          if(data.file_name===c.name&&typeof data.download_url==='string')metadata=data;
-        }
-      }
-      if(metadata){
-        if(!resourceFetchAttempted){
-          resourceFetchAttempted=true;
-          const resourceUrl=new URL(metadata.download_url);
-          if(resourceUrl.protocol!=='https:'||!(resourceUrl.hostname==='chatgpt.com'||resourceUrl.hostname.endsWith('.oaiusercontent.com')))
-            fail('ARTIFACT_RESOURCE_UNTRUSTED','网页下载元数据指向了未核验的文件来源。','artifact');
-          // Download only the asset URL returned by the user's real UI action,
-          // using browser semantics. No auth headers are read or copied.
-          const fetched=await page.fetch(metadata.download_url,{saveAs:input.destination});
-          const stat=await fs.stat(input.destination).catch(()=>null);
-          if(fetched.ok&&stat?.size>0){
-            if(Number.isFinite(metadata.file_size_bytes)&&metadata.file_size_bytes>0&&metadata.file_size_bytes!==stat.size)fail('ARTIFACT_INCOMPLETE','文件字节数与非零下载元数据不一致。','artifact');
-            return {saved:true,transport:'ui_download_asset_url',size_bytes:stat.size,mime_type:fetched.headers['content-type']??metadata.mime_type,provider_size_bytes:metadata.file_size_bytes};
-          }
-        }
-        const resource=Array.from(responses.entries()).find(([id,r])=>r.url===metadata.download_url&&finished.has(id));
-        if(resource){
-          const [id,r]=resource;
-          if(r.status!==200)fail('ARTIFACT_DOWNLOAD_FAILED',`网页下载返回 HTTP ${r.status}。`,'artifact');
-          const body=await page.cdp('Network.getResponseBody',{requestId:id});
-          const bytes=Buffer.from(body.body,body.base64Encoded?'base64':'utf8');
-          if(Number.isFinite(metadata.file_size_bytes)&&metadata.file_size_bytes!==bytes.length)fail('ARTIFACT_INCOMPLETE','收到的字节数与网页文件元数据不一致。','artifact');
-          await fs.writeFile(input.destination,bytes,{mode:0o600});
-          return {saved:true,transport:'ui_download_response',size_bytes:bytes.length,mime_type:r.mimeType,provider_size_bytes:metadata.file_size_bytes};
-        }
-      }
-      await new Promise(r=>setTimeout(r,150));
+    if(c.kind==='inline_image') {
+      const src=await page.evaluate(({userId,index})=>{
+        const turn=Array.from(document.querySelectorAll('[data-talvt-turn-state]')).find(t=>t.querySelector('[data-chatgpt-search-message-ids]')?.getAttribute('data-chatgpt-search-message-ids')===userId);
+        if(!turn)return null;const user=turn.querySelector('[data-chatgpt-search-message-ids]');
+        const images=Array.from(turn.querySelectorAll('img')).filter(e=>!user?.contains(e)&&e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden'&&!e.closest('[data-markdown-text-tone="tertiary"]')&&e.getBoundingClientRect().width>32&&e.getBoundingClientRect().height>32);
+        return images[index]?.currentSrc||images[index]?.src;
+      },{userId:input.user_message_id,index:c.index});
+      if(!src)artifactFail('ARTIFACT_ASSOCIATION_FAILED','当前回答找不到对应图片。');
+      const url=new URL(src);
+      if(!['blob:','data:'].includes(url.protocol)&&!(url.protocol==='https:'&&(url.hostname==='chatgpt.com'||url.hostname.endsWith('.oaiusercontent.com'))))
+        artifactFail('EXTERNAL_IMAGE_NOT_COPIED','外部站点图片保留为网页内容，不由服务自动抓取。');
+      const response=await page.fetch(src,{saveAs:input.destination});
+      const type=response.headers['content-type']??response.headers['Content-Type']??'';
+      if(!response.ok||!/^image\/(png|jpeg|gif|webp)(;|$)/.test(type))artifactFail('ARTIFACT_TYPE_MISMATCH','图片响应状态或 MIME 不符合可回传的图像类型。');
+      return {saved:true,transport:'rendered_image_url',mime_type:type.split(';')[0]};
     }
-    fail('ARTIFACT_DOWNLOAD_UNCONFIRMED','已点击下载，但未观察到完整的原始文件字节。','artifact');
-  } finally {await page.cdp('Network.disable');}
+    if(c.kind!=='file_card') artifactFail('ARTIFACT_CAPTURE_UNSUPPORTED','该产物呈现方式尚未验证可安全导出原始字节。');
+    const token='artifact-'+Date.now().toString(36);
+    const selected=await page.evaluate(({userId,candidate,token})=>{
+      const turn=Array.from(document.querySelectorAll('[data-talvt-turn-state]')).find(t=>t.querySelector('[data-chatgpt-search-message-ids]')?.getAttribute('data-chatgpt-search-message-ids')===userId);
+      if(!turn)return false;
+      const user=turn.querySelector('[data-chatgpt-search-message-ids]');
+      const previews=Array.from(turn.querySelectorAll('button:is([aria-label^="開啟 "][aria-label$=" 預覽"],[aria-label^="打开 "][aria-label$=" 预览"],[aria-label^="Open "][aria-label$=" preview"])')).filter(e=>!user?.contains(e)&&e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden');
+      const preview=previews[candidate.index];
+      if(!preview||!['開啟 '+candidate.name+' 預覽','打开 '+candidate.name+' 预览','Open '+candidate.name+' preview'].includes(preview.getAttribute('aria-label')))return false;
+      let card=preview.parentElement;
+      while(card&&card!==turn){
+        const downloads=card.querySelectorAll('button:is([data-testid="download-file"],[aria-label="下載檔案"],[aria-label="下载文件"],[aria-label="Download file"])');
+        if(downloads.length===1){preview.setAttribute('data-ego-preview',token);downloads[0].setAttribute('data-ego-download',token);return true;}
+        if(downloads.length>1)return false;
+        card=card.parentElement;
+      }
+      return false;
+    },{userId:input.user_message_id,candidate:c,token});
+    if(!selected)artifactFail('ARTIFACT_ASSOCIATION_FAILED','找不到该消息中对应的唯一文件卡片。');
+    await page.evaluate(token=>Array.from(document.querySelectorAll('[data-ego-preview]')).find(e=>e.getAttribute('data-ego-preview')===token)?.scrollIntoView({block:'center',inline:'nearest'}),token);
+    await page.hover(`loc=css:[data-ego-preview="${token}"]`);
+    await page.cdp('Network.enable');await page.events();
+    try {
+      const budget=Date.now()+75000;
+      const retryable=new Set(['ARTIFACT_URL_MISSING','ARTIFACT_POD_EXPIRED','ARTIFACT_REFERENCE_NOT_FOUND','ARTIFACT_HTTP_TRANSIENT','ARTIFACT_DOWNLOAD_UNOBSERVED']);
+      for(let attempt=1;attempt<=3&&Date.now()<budget;attempt++){
+        diagnostic={...classifyDownload(null,null).context,attempt,elapsed_ms:Date.now()-started};
+        await page.events();
+        await page.click(`loc=css:[data-ego-download="${token}"]`);
+        const responses=new Map(),requests=new Map(),finished=new Set(),checked=new Set();
+        let metadata,resourceUrl,resourceFetchAttempted=false,failure,retryAfter=2000;
+        let deadline=Math.min(budget,Date.now()+12000);
+        while(Date.now()<deadline&&!failure){
+          for(const event of await page.events()){
+            const p=event.params;
+            if(event.method==='Network.requestWillBeSent'){
+              try {requests.set(p.requestId,new URL(p.request.url).searchParams.get('message_id'));} catch {}
+            }
+            if(event.method==='Network.responseReceived')responses.set(p.requestId,p.response);
+            if(event.method==='Network.loadingFinished')finished.add(p.requestId);
+          }
+          const candidates=[];
+          for(const [id,response] of responses){
+            if(!finished.has(id)||checked.has(id))continue;
+            let path;try {path=new URL(response.url).pathname;} catch {continue;}
+            if(!path.endsWith('/interpreter/download'))continue;
+            checked.add(id);
+            let data=null;
+            try {
+              if(response.encodedDataLength>262144)throw Error('metadata too large');
+              const body=await page.cdp('Network.getResponseBody',{requestId:id});
+              if(body.body.length>349528)throw Error('metadata too large');
+              const text=body.base64Encoded?Buffer.from(body.body,'base64').toString():body.body;
+              if(Buffer.byteLength(text)>262144)throw Error('metadata too large');
+              data=JSON.parse(text);
+            } catch {}
+            const messageId=requests.get(id);
+            if(input.assistant_message_id&&messageId&&messageId!==input.assistant_message_id)continue;
+            if(data?.file_name&&!downloadAssociation(messageId,input.assistant_message_id,data,c.name))continue;
+            if(!data?.file_name&&!(input.assistant_message_id&&messageId===input.assistant_message_id)&&data?.status==='success')continue;
+            candidates.push({data,response,matched:!!(input.assistant_message_id&&messageId===input.assistant_message_id)});
+          }
+          candidates.sort((a,b)=>Number(b.matched)-Number(a.matched));
+          if(!metadata&&candidates.length){
+            const {data,response}=candidates[0],classified=classifyDownload(data,response.status);
+            diagnostic={...classified.context,attempt,elapsed_ms:Date.now()-started};
+            if(classified.code){
+              failure=classified.code;
+              if(response.status===429){
+                const value=Object.entries(response.headers??{}).find(([k])=>k.toLowerCase()==='retry-after')?.[1];
+                const delay=/^\d+(?:\.\d+)?$/.test(String(value))?Number(value)*1000:Date.parse(value)-Date.now();
+                if(Number.isFinite(delay))retryAfter=Math.max(2000,delay);
+              }
+              break;
+            }
+            metadata=data;resourceUrl=classified.url;deadline=Math.min(budget,Date.now()+30000);
+          }
+          if(metadata){
+            if(!resourceFetchAttempted){
+              resourceFetchAttempted=true;
+              let fetched;
+              try {fetched=await page.fetch(resourceUrl,{saveAs:input.destination});} catch {}
+              const stat=await fs.stat(input.destination).catch(()=>null);
+              if(fetched?.ok&&stat?.size>0){
+                if(Number.isFinite(metadata.file_size_bytes)&&metadata.file_size_bytes>0&&metadata.file_size_bytes!==stat.size)artifactFail('ARTIFACT_INCOMPLETE','文件字节数与非零下载元数据不一致。');
+                return {saved:true,transport:'ui_download_asset_url',size_bytes:stat.size,mime_type:fetched.headers?.['content-type']??metadata.mime_type,provider_size_bytes:metadata.file_size_bytes};
+              }
+            }
+            const resource=Array.from(responses.entries()).find(([id,r])=>r.url===resourceUrl&&finished.has(id));
+            if(resource){
+              const [id,r]=resource;
+              if(r.status!==200)artifactFail('ARTIFACT_DOWNLOAD_FAILED',`网页下载返回 HTTP ${r.status}。`);
+              let body;
+              try {body=await page.cdp('Network.getResponseBody',{requestId:id});} catch {artifactFail('ARTIFACT_DOWNLOAD_UNCONFIRMED','无法读取已观察到的文件响应。');}
+              const bytes=Buffer.from(body.body,body.base64Encoded?'base64':'utf8');
+              if(Number.isFinite(metadata.file_size_bytes)&&metadata.file_size_bytes>0&&metadata.file_size_bytes!==bytes.length)artifactFail('ARTIFACT_INCOMPLETE','收到的字节数与网页文件元数据不一致。');
+              await fs.writeFile(input.destination,bytes,{mode:0o600});
+              return {saved:true,transport:'ui_download_response',size_bytes:bytes.length,mime_type:r.mimeType,provider_size_bytes:metadata.file_size_bytes};
+            }
+          }
+          await new Promise(r=>setTimeout(r,150));
+        }
+        failure??=metadata?'ARTIFACT_DOWNLOAD_UNCONFIRMED':'ARTIFACT_DOWNLOAD_UNOBSERVED';
+        if(!retryable.has(failure)||attempt===3||Date.now()+retryAfter>=budget)artifactFail(failure,'未取得可交付的文件；请查看下载诊断。');
+        await new Promise(r=>setTimeout(r,retryAfter));
+      }
+      artifactFail('ARTIFACT_DOWNLOAD_UNOBSERVED','文件下载观察预算已用尽。');
+    } finally {await page.cdp('Network.disable');}
+  } catch(error) {
+    error.diagnostic_context??={...diagnostic,elapsed_ms:Date.now()-started};
+    throw error;
+  }
 }
 
 async function configure(page, change=true) {
@@ -461,5 +534,5 @@ catch(error) {
   reason=reason.replace(/Bearer\s+\S+/gi,'Bearer [redacted]').replace(/((?:cookie|token|authorization)\s*[:=]\s*)[^\s,;]+/gi,'$1[redacted]').slice(0,1200);
   console.log('EGO_BRIDGE_JSON:'+JSON.stringify({ok:false,error:{error_code:error.code??'BROWSER_OPERATION_FAILED',
     message:error.code?error.message:reason,stage:error.stage??input.action,
-    diagnostic_context:{...receipt,cause_name:error.name,reason}},receipt}));
+    diagnostic_context:{...receipt,...error.diagnostic_context,cause_name:error.name,reason}},receipt}));
 }
