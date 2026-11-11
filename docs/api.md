@@ -7,7 +7,7 @@ MCP `/mcp`、REST `POST /api/<tool>`、WebUI `POST /ui/api/tool/<name>` 共用 S
 | 工具 | 参数 | 行为 |
 | --- | --- | --- |
 | ask | text；query_id=null、effort="extra_high"、attachments=null、request_id=null、wait_seconds=0 | 新建或在原会话追问，顺便等待可省一次调用 |
-| wait | query_id；message_id=null、timeout_seconds=120 | 最多等待 300 秒，终止时直接返回最终结果 |
+| wait | query_id；message_id=null、timeout_seconds=50 | 最多等待 300 秒，终止时直接返回最终结果 |
 | get | query_id；message_id=null、verbose=false | 精简结果；verbose=true 返回旧版 get_query_result compact=false 默认完整 payload |
 | list | status=null、limit=20（1..100） | 列出 query_id、title、status、rounds、updated_at |
 | read_artifact | artifact_id；inline_image=true | 小图片直接返回，其余返回 MCP 资源链接 |
@@ -23,7 +23,7 @@ MCP `/mcp`、REST `POST /api/<tool>`、WebUI `POST /ui/api/tool/<name>` 共用 S
 ### 精简结果
 
 ```json
-{"ok":true,"query_id":"q_...","message_id":"msg_...","round":1,"status":"running","elapsed_seconds":12.0,"answer_characters":0,"phase":"思考中","next":{"tool":"wait","arguments":{"query_id":"q_...","message_id":"msg_...","timeout_seconds":120}}}
+{"ok":true,"query_id":"q_...","message_id":"msg_...","round":1,"status":"running","elapsed_seconds":12.0,"answer_characters":0,"phase":"思考中","next":{"tool":"wait","arguments":{"query_id":"q_...","message_id":"msg_...","timeout_seconds":50}}}
 ```
 
 ```json
@@ -36,7 +36,7 @@ COMPLETED 且生成与文件完整才映射 done；其余终止但不完整状�
 
 发送结果不确定且有提交记录和基线时，服务端自动 recover_session；已确认生成完成但文件未齐时自动 collect_artifacts。对外分别显示 running/核对中、running/收集文件中。每轮共 3 次、至少间隔 10 秒，次数存入数据库；执行名额满时延后且不消耗次数。失败耗尽后 needs_you，what_to_do 说明自动处理已停止。不支持的输出直接 needs_you。自动路径绝不重新发送。
 
-MCP 普通工具结果只含 structuredContent 和一个 TextContent：未完成为紧凑 JSON；done 时文本为一行状态头加 Markdown 正文。消费者选一个通道读取。read_artifact 保持原有图片/资源协议，diagnose 保留完整诊断。
+MCP 普通工具结果只含 structuredContent 和一个 TextContent：未完成为紧凑 JSON；done 时文本为 Markdown 正文，末尾附 query_id、轮次、文件 artifact_id 和来源，纯文本客户端也能追问和取文件。消费者选一个通道读取。read_artifact 保持原有图片/资源协议，diagnose 保留完整诊断。
 
 ## WebUI 会话串
 
