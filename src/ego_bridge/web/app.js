@@ -271,9 +271,10 @@ function problemCard(r){
   }else if(e.safe_to_retry){
     title='消息还没发出去就失败了';hint='重试是安全的，不会重复提问。';actions.push(['重试','retry_query']);
   }else if(k==='failed')title='这一轮失败了';
-  else{title='需要你看一下';actions.push(['核对网页','recover_session']);}
+  else{title='需要你看一下';hint='网页可能还在生成，先让服务端核对一次；不会重发消息。';actions.push(['核对网页','recover_session']);}
   box.append(node('div',title,'problem-title'));
-  const detail=[r.problem?.message||e.message,r.problem?.what_to_do||e.what_to_do||hint].filter(Boolean).join(' ');
+  // what_to_do from the server is written for agents; people get the hint above.
+  const detail=[e.message||r.problem?.message,hint].filter(Boolean).join(' ');
   if(detail)box.append(node('div',detail));
   const row=node('div',undefined,'button-row');
   actions.forEach(([label,name],n)=>row.append(button(label,n?'secondary':'primary',event=>act(name,r,event.target))));
