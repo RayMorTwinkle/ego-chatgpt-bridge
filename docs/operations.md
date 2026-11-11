@@ -31,7 +31,7 @@ WebUI cookie 不含原始 token，只含签名的身份、过期时间和 token 
 
 ## 正常任务状态
 
-创建与幂等记录在同一 BEGIN IMMEDIATE 事务进入 QUEUED。PREPARING 只核查和填写草稿。基线、页面标签、UI 模型核验落库后，SUBMITTING 与 submitted_at 原子提交，再执行一次发送。
+创建与幂等记录在同一 BEGIN IMMEDIATE 事务进入 QUEUED。PREPARING 只核查和填写草稿。发送前的暂时性错误会按下述策略回到 QUEUED，等待持久化的退避时间。基线、页面标签、UI 模型核验落库后，SUBMITTING 与 submitted_at 原子提交，再执行一次发送。
 
 ```mermaid
 stateDiagram-v2
@@ -61,7 +61,7 @@ SQLite 使用 WAL、synchronous=FULL、foreign_keys 和启动 quick_check，损�
 
 ## 页面及产物
 
-空间按稳定 ID 和名称核对；默认独占模式自动接管，空间丢失后允许重建并将迁移写入私有 runtime-events.jsonl；重建不等于历史恢复，仍按精确会话与消息核验。关闭 force_space_takeover 或 recreate_missing_space 可改为停止策略。页面标签只是提示，失效后使用已验证 Conversation ID 和 URL 重连，不猜标题。
+空间按唯一精确名称定位，ID 仅属于当前 Ego 实例；旧 ID 指向其他名称时，若能找到唯一同名空间则自动迁移并记录 `SPACE_REBOUND`，不会接管旧 ID 指向的空间。找不到同名空间时不能区分重命名与编号复用，仍停止并返回配置编号、对应名称和同名候选编号。默认独占模式自动接管，空间丢失后允许重建并将迁移写入私有 runtime-events.jsonl；重建不等于历史恢复，仍按精确会话与消息核验。关闭 force_space_takeover 或 recreate_missing_space 可改为停止策略。页面标签只是提示，失效后使用已验证 Conversation ID 和 URL 重连，不猜标题。
 
 新会话的 local-chatgpt 临时地址不会登记为正式 Conversation ID。只有基线和带请求标记的用户消息核验通过后才绑定正式地址；旧版本保存的临时地址也只能在同样核验后升级，不能更换已确认的正式地址。
 
@@ -145,3 +145,35 @@ Python回归：`uv run pytest -q`。DOM回归：`npm ci --ignore-scripts && npm 
 轮询优先 `wait_query`，单次0..30秒，不持有浏览器控制锁。cursor 对状态/内容/产物变化计算，忽略单纯观测时间刷新；响应是替换快照，非字符追加协议。客户端用上次 cursor，完成后按需取正文。CLI `--wait` 已改用该接口。Markdown 是从 DOM 重建，表格/链接保留，特殊交互式内容仍不能保证无损。
 
 MCP 與 HTTP API 收到通過驗證的研究提交後，`service.log` 記下 `submission_received`，並保留請求進入橋接器時的 `http_received_at`。派送結束時，`submission_result` 用同一個 `trace_id` 關聯結果及任務 ID。兩筆紀錄只含服務端產生的識別碼、時間、工具、傳輸類型或錯誤代碼，沿用既有日誌輪替。呼叫端的授權及代理轉發時間需另用各層的紀錄核對。
+
+
+## 执行层自动恢复
+
+操作的 `auto_retry` 返回 `attempts`、`max`、`next_at`（Unix 秒或 null）、`kind`、各恢复类型的 `counters` 及原始错误 `history`。attempts 是本类型已安排的重试次数，不含第一次执行；history 的 attempt=0 是首次失败，包含重试用尽时的最后错误。发送前重试和文件重收各最多 3 次，失败后分别等候 15 / 60 / 180 秒（实际执行还受轮询周期和名额限制）。计数、错误和期限写入 SQLite，重启不清空预算；手动重试也不重置自动预算。
+
+只有 `submitted_at IS NULL` 且仍在 prepare 阶段的以下错误才自动重新排队。prepare 可填写草稿、上传附件、核验账户和模型，但不会点击发送。发送意图一旦落库，无论回执是否说 clicked，都不重新排队。
+
+| 错误码 | 决策及理由 |
+| --- | --- |
+| BROWSER_OPERATION_FAILED | 仅 prepare 自动重试；定位／点击账户、模型等失败不可能发送消息。submit 阶段转 OUTCOME_UNKNOWN。 |
+| BROWSER_TIMEOUT | 仅 prepare 自动重试；可能产生草稿等页面效果，但没有发送路径。submit 超时保留 OUTCOME_UNKNOWN。 |
+| EGO_CONNECTION_FAILED | prepare 未收到回执仍可重试，因为这个动作不会发送；submit 无回执必须对账。 |
+| EGO_UNAVAILABLE | 找不到 Ego CLI，没有发送，有限重试等待环境恢复。 |
+| PAGE_LOAD_FAILED | 编辑器加载失败，没有发送，允许重试加载。 |
+| TAB_MISSING | prepare 找不到原页，没有发送，允许重新定位；仍执行会话／历史核验。 |
+| HISTORY_NOT_CONFIRMED | 可能只是历史未加载；有限重试完整核验，不跳过校验。 |
+| ATTACHMENT_UPLOAD_FAILED | 上传动作无发送路径；保留暂存字节并重试本操作附件。 |
+| ATTACHMENT_UPLOAD_INCOMPLETE | 附件尚未可发送，允许再次准备。 |
+| DRAFT_ATTACHMENT_MISMATCH | 发送前校验失败；只清理带本操作标记的代理草稿，不覆盖其他草稿。 |
+| SPACE_IDENTITY_MISMATCH | 不盲目重试。唯一精确名称匹配时先自动迁移；其他情况身份不确定，需人工处理。 |
+| GENERATION_TIMEOUT | 保留 NEEDS_ATTENTION；已经提交，不能重发或自动延长用户硬超时。可手动只读对账。 |
+| ARTIFACT_CAPTURE_FAILED | 整轮回答已核验完成、仅缺原始文件时自动重收三次；每次重新核对原会话／请求／消息。不重新生成。不支持的音视频或交互输出不做无效重试。 |
+| 其他错误 | 默认不自动重试。LOGIN_REQUIRED、ACCOUNT_MISMATCH、PROJECT_MISMATCH、CONVERSATION_MISMATCH、HISTORY_CHANGED、SPACE_AMBIGUOUS、MODEL_UNAVAILABLE、EFFORT_UNAVAILABLE、MODEL_MISMATCH、UI_CHANGED、草稿冲突或附件字节缺失等需要身份／内容／环境修复。 |
+
+文件重收退避期间保留 GENERATING，`generation_complete=true`、`delivery_complete=false`，不提前要求人工处理；三次仍失败才 NEEDS_ATTENTION。重收时的暂时性观察错误也占用同一重收预算，身份／关联错误立即停止。
+
+OUTCOME_UNKNOWN 会在 15 秒后、执行名额可用时自动调用一次 recover（与 recover_session 相同的只读消息对账逻辑）。先持久化消耗本次机会，再读原对话；基线、唯一请求标记和消息数对得上才恢复观察或完成，失败保持错误供人工核对。空间接管、重新打开原 URL 属于恢复导航，不发送消息、不切模型。
+
+观察到正式会话且消息关联通过后，顺便读取 document.title，去除尾部 ChatGPT 品牌后缀并排除默认标题，写入 queries.chat_title。缺失或默认标题不影响任务完成，也不清除已知标题；新会话默认为 null。list_queries、get_query_status、get_query_result（含 compact）均返回 chat_title。此字段依赖实际渲染页面，不保证在 ChatGPT 生成标题前就能取得。
+
+此次排查只读取了现存 service.log 及 5 份 .gz 轮换：均未记录 SPACE_IDENTITY_MISMATCH 或空间身份上下文，无法认定两次线上失败的确切原因。离线回归测试复现并修复了“旧编号被其他空间复用、正确名称在新编号上”的分支；真正的用户重命名仍需人工确认，不推断它与编号复用等价。

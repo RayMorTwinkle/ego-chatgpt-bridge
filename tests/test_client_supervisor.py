@@ -109,3 +109,17 @@ def test_same_named_space_is_exclusive_across_runtime_dirs_and_rebinding_is_audi
         assert settings.space_id==8 and json.loads((a/'config.json').read_text())['space_id']==8
         event=json.loads((a/'runtime-events.jsonl').read_text());assert event['recreated'] and not event['history_restored']
     finally:adapter.close()
+
+
+def test_named_space_id_migration_updates_config_and_records_reason(tmp_path,monkeypatch):
+    monkeypatch.setattr(Path,'home',classmethod(lambda cls:tmp_path))
+    runtime=tmp_path/'runtime';runtime.mkdir()
+    settings=Settings(runtime,space_id=2);adapter=EgoAdapter(settings)
+    try:
+        adapter.accept_space({'runtime_space':{'previous_id':2,'space_id':9,'name':settings.space_name,
+            'recreated':False,'reason':'named_space_id_changed'}})
+        assert settings.space_id==9 and json.loads((runtime/'config.json').read_text())['space_id']==9
+        event=json.loads((runtime/'runtime-events.jsonl').read_text())
+        assert event['event']=='SPACE_REBOUND' and event['previous_id']==2
+        assert event['reason']=='named_space_id_changed' and not event['recreated']
+    finally:adapter.close()

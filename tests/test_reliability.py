@@ -64,7 +64,7 @@ async def test_pre_send_failures_preserve_structured_reason_and_do_not_send(rig,
     a=await create(s)
     await execute(s,db,a)
     op=db.operation(a['message_id'])
-    assert op['status']=='NEEDS_ATTENTION' and op['submitted_at'] is None
+    assert op['status']==('QUEUED' if code in {'EGO_UNAVAILABLE','PAGE_LOAD_FAILED'} else 'NEEDS_ATTENTION') and op['submitted_at'] is None
     assert op['error']['error_code']==code and op['error']['stage']=='prepare'
     assert op['error']['query_id']==a['query_id'] and op['error']['request_id']=='r1'
     assert not fake.sent
@@ -613,3 +613,144 @@ async def test_historical_load_error_result_is_not_served_as_complete(rig):
     assert not result['complete'] and not result['generation_complete']
     assert result['result']['content'] == ''
     assert result['last_error']['error_code'] == 'ANSWER_LOAD_FAILED'
+
+
+@pytest.mark.parametrize('code',[
+    'BROWSER_OPERATION_FAILED','BROWSER_TIMEOUT','ATTACHMENT_UPLOAD_FAILED','EGO_CONNECTION_FAILED',
+    'ATTACHMENT_UPLOAD_INCOMPLETE','DRAFT_ATTACHMENT_MISMATCH','HISTORY_NOT_CONFIRMED','TAB_MISSING',
+])
+async def test_pre_send_retry_backoff_is_bounded_and_errors_are_durable(rig,monkeypatch,code):
+    s,db,fake=rig;clock=[1000.0]
+    monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
+    calls=[]
+    async def fail(action,**kw):
+        calls.append(action)
+        raise BridgeError(code,'temporary failure',stage='prepare',action=True,context={'page_label':'p1'})
+    fake.call=fail
+    task=await create(s)
+    for attempt,delay in enumerate((15,60,180),1):
+        await execute(s,db,task)
+        op=db.operation(task['message_id'])
+        assert op['status']=='QUEUED' and op['submitted_at'] is None
+        assert op['auto_retry']['attempts']==attempt and op['auto_retry']['next_at']==clock[0]+delay
+        assert not op['error']['user_action_required']
+        before=len(calls)
+        await execute(s,db,task)
+        assert len(calls)==before  # A poll before the deadline must not run prepare.
+        clock[0]+=delay
+    await execute(s,db,task)
+    op=db.operation(task['message_id'])
+    assert op['status']=='NEEDS_ATTENTION' and op['auto_retry']['next_at'] is None
+    assert len(op['auto_retry']['history'])==4 and len(calls)==4 and not fake.sent
+    assert all(h['error']['error_code']==code for h in op['auto_retry']['history'])
+    assert (await s.dispatch('alice','get_query_status',{'query_id':task['query_id']}))['auto_retry']['max']==3
+
+
+async def test_pre_send_retry_survives_reopen_and_reuses_upload_bytes(rig,monkeypatch):
+    s,db,fake=rig;clock=[1000.0]
+    monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
+    original=fake.call
+    async def fail(action,**kw):
+        if action=='prepare':raise BridgeError('ATTACHMENT_UPLOAD_FAILED','upload failed',stage='prepare')
+        return await original(action,**kw)
+    fake.call=fail
+    task=await create(s,attachments=[{'filename':'report.txt','content_base64':'YQ=='}])
+    await execute(s,db,task)
+    db.close();s.store=Store(s.settings.runtime);s.artifacts.store=s.store
+    try:
+        assert s.store.uploads(task['message_id'])=={'report.txt':b'a'}
+        await s.execute(s.store.operation(task['message_id']))
+        assert not fake.sent
+        fake.call=original;clock[0]+=15
+        await s.execute(s.store.operation(task['message_id']))
+        assert len(fake.sent)==1 and s.store.operation(task['message_id'])['auto_retry']['next_at'] is None
+    finally:s.store.close()
+
+
+async def test_unknown_automatically_reconciles_once_after_backoff_without_resending(rig,monkeypatch):
+    s,db,fake=rig;clock=[1000.0]
+    monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
+    fake.crash_after_send=True
+    task=await create(s);await execute(s,db,task)
+    assert db.operation(task['message_id'])['status']=='OUTCOME_UNKNOWN'
+    await s.automatic_recovery()
+    assert db.operation(task['message_id'])['status']=='OUTCOME_UNKNOWN'
+    clock[0]+=15;await s.automatic_recovery()
+    op=db.operation(task['message_id'])
+    assert op['status']=='COMPLETED' and len(fake.sent)==1
+    assert op['auto_retry']['counters']['recover']==1 and op['auto_retry']['next_at'] is None
+
+
+async def test_failed_automatic_reconciliation_is_not_repeated(rig,monkeypatch):
+    s,db,fake=rig;clock=[1000.0];calls=[]
+    monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
+    fake.crash_after_send=True
+    task=await create(s);await execute(s,db,task)
+    fake.pages['p1'][0]['user_text']='wrong message'
+    original=fake.call
+    async def track(action,**kw):
+        calls.append(action);return await original(action,**kw)
+    fake.call=track
+    clock[0]+=15;await s.automatic_recovery()
+    for _ in range(3):
+        clock[0]+=180;await s.automatic_recovery()
+    op=db.operation(task['message_id'])
+    assert op['status']=='OUTCOME_UNKNOWN' and op['auto_retry']['next_at'] is None
+    assert calls==['recover'] and len(fake.sent)==1
+    await s.execute(op)
+    assert len(fake.sent)==1
+
+
+@pytest.mark.parametrize('title,expected',[(None,None),('ChatGPT',None),('New chat',None),('Research findings - ChatGPT','Research findings'),('研究结果','研究结果')])
+async def test_chat_title_is_optional_and_returned_in_all_query_views(rig,title,expected):
+    s,db,fake=rig;original=fake.call
+    async def titled(action,**kw):
+        result=await original(action,**kw)
+        if action in {'observe','recover'}:result['state']['title']=title
+        return result
+    fake.call=titled
+    task=await create(s);await execute(s,db,task);await s.observe(db.operation(task['message_id']))
+    for tool in ('get_query_status','get_query_result'):
+        result=await s.dispatch('alice',tool,{'query_id':task['query_id'],'compact':True})
+        assert result['chat_title']==expected and result['status']=='COMPLETED'
+    assert (await s.dispatch('alice','list_queries',{}))['queries'][0]['chat_title']==expected
+
+
+def test_old_query_schema_migrates_without_losing_rows(tmp_path):
+    import sqlite3
+    with sqlite3.connect(tmp_path/'bridge.sqlite3') as db:
+        db.execute('CREATE TABLE queries(id TEXT PRIMARY KEY,owner TEXT NOT NULL,conversation_url TEXT,conversation_id TEXT,project_id TEXT NOT NULL,space_id INTEGER NOT NULL,created_at REAL NOT NULL,updated_at REAL NOT NULL)')
+        db.execute("INSERT INTO queries VALUES('old','alice',NULL,NULL,'project',2,1,1)")
+    store=Store(tmp_path)
+    assert store.query('alice','old')['chat_title'] is None
+    store.close()
+    store=Store(tmp_path)
+    assert store.query('alice','old')['space_id']==2
+    store.close()
+
+
+async def test_worker_automatically_runs_due_retry_without_manual_dispatch(rig,monkeypatch):
+    s,db,fake=rig;clock=[1000.0];calls=[]
+    monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
+    failed=asyncio.Event();sent=asyncio.Event();original=fake.call
+    async def temporary(action,**kw):
+        if action=='prepare':
+            calls.append(action)
+            if len(calls)==1:
+                failed.set()
+                raise BridgeError('BROWSER_OPERATION_FAILED','temporary model locator failure',stage='prepare')
+        result=await original(action,**kw)
+        if action=='submit':sent.set()
+        return result
+    fake.call=temporary
+    task=await create(s)
+    await s.start()
+    try:
+        await asyncio.wait_for(failed.wait(),1)
+        assert db.operation(task['message_id'])['status']=='QUEUED'
+        clock[0]+=14;s.wake.set();await asyncio.sleep(.02)
+        assert len(calls)==1 and not fake.sent
+        clock[0]+=1;s.wake.set()
+        await asyncio.wait_for(sent.wait(),1)
+        assert len(calls)==2 and len(fake.sent)==1
+    finally:await s.stop()
