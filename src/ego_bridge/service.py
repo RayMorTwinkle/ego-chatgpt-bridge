@@ -34,6 +34,11 @@ def normalize(text: str) -> str:
     return " ".join(text.split())
 
 
+def request_text(turn: dict, expected: str) -> str:
+    source = normalize(turn.get('user_source_text', ''))
+    return source if source == expected else normalize(turn.get('user_text', ''))
+
+
 def history(turns: list[dict]) -> list[dict]:
     return [{"user_id": t.get("user_id"), "user_text": normalize(t.get("user_text", "")),
              "assistant_id": t.get("assistant_id"), "assistant_text": normalize(t.get("assistant_text", ""))} for t in turns]
@@ -273,7 +278,7 @@ class Service:
             async with self.control:
                 response=await self.adapter.call('recover',**self.browser_args(op))
                 self.store.patch(op['id'],page_label=response['page_label'])
-                matches=[t for t in response['state']['turns'] if t.get('user_id')==op['result'].get('user_message_id') and normalize(t.get('user_text',''))==normalize(self.browser_args(op)['send_text'])]
+                matches=[t for t in response['state']['turns'] if t.get('user_id')==op['result'].get('user_message_id') and request_text(t,normalize(self.browser_args(op)['send_text']))==normalize(self.browser_args(op)['send_text'])]
                 if len(matches)!=1 or matches[0].get('assistant_id')!=op['result'].get('assistant_message_id'):
                     raise BridgeError('ARTIFACT_ASSOCIATION_FAILED','产物消息身份与原回答不一致。',stage='artifact',action=True)
                 self.store.bind_conversation(qid,q['conversation_url'],q['conversation_id'],self.settings.space_id)
@@ -427,7 +432,7 @@ class Service:
             new = turns[len(old):]
             def summary(reason):
                 first=new[0] if new else {}
-                actual=normalize(first.get('user_text',''))
+                actual=request_text(first,expected)
                 marker=f"[ego-bridge request:{op['id']}]"
                 cid=s.get('identity',{}).get('conversation')
                 observed_url=f'https://chatgpt.com/g/{self.settings.project_id}/c/{cid}' if cid and not provisional_conversation(cid) else None
@@ -450,13 +455,13 @@ class Service:
                     raise BridgeError('SEND_OUTCOME_UNKNOWN','页面未提供新消息证据；不能判断是否发送。',stage='observe',action=True,context=summary('no_new_turn'))
                 return
             if len(new)==1:
-                actual=normalize(new[0].get('user_text',''))
+                actual=request_text(new[0],expected)
                 hydrating=not new[0].get('user_id') or not actual or (expected.startswith(actual) and actual!=expected)
                 if hydrating and now()-op['submitted_at']<=30:
                     target='GENERATING' if op['status']=='GENERATING' else 'WAITING_FOR_RESPONSE'
                     self.store.transition(op['id'],target,error=None)
                     return
-            if len(new)!=1 or normalize(new[0]['user_text'])!=expected:
+            if len(new)!=1 or request_text(new[0],expected)!=expected:
                 reason='new_turn_count_mismatch' if len(new)!=1 else 'user_text_mismatch'
                 raise BridgeError('MESSAGE_ASSOCIATION_FAILED','网页消息未通过唯一请求关联；未取用其他消息，也不会重发。请查看 diagnostic_context 的计数、哈希和读回状态。',stage='observe',action=True,context=summary(reason))
             cid = s["identity"].get("conversation")

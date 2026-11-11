@@ -19,6 +19,13 @@ const user=()=>`<div data-chatgpt-search-message-ids="u1"><div data-user-message
 const thought='<div data-markdown-text-style="assistant-message" data-markdown-text-tone="tertiary" style="display:none">Searching sources</div>';
 const body=()=>`<div data-chatgpt-selection-message-id="a1"><div data-markdown-text-style="assistant-message"><h2>Research answer</h2><p>Verified result <a href="https://example.org/official">Official source</a></p><div data-markdown-text-style="assistant-message"><pre><code>print("hello")\nprint("world")</code></pre><button data-markdown-copy="exclude">複製代碼</button></div></div></div>`;
 
+test('user inline code has an exact source representation while literal code blocks keep their text',()=>{
+  fixture('<div data-chatgpt-search-message-ids="u1"><div data-search-result-target>Read <code>SKILL.md</code> now.<pre><code>literal `code`</code></pre></div></div>');
+  const turn=readChatPage().turns[0];
+  assert.equal(turn.user_text,'Read SKILL.md now.\nliteral `code`');
+  assert.equal(turn.user_source_text,'Read `SKILL.md` now.\nliteral `code`');
+});
+
 test('collapsed prompt excludes ellipsis and interactive chrome without stripping literal prompt words',()=>{
   fixture(user()+thought+body());
   assert.equal(readChatPage().turns[0].user_text,prompt);

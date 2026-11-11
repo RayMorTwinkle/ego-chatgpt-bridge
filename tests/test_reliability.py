@@ -203,6 +203,21 @@ async def test_crash_after_acceptance_never_resends(rig):
     assert len(fake.sent) == 1
 
 
+async def test_inline_code_rendering_can_recover_without_resending_or_accepting_other_text(rig):
+    service, store, browser = rig
+    task = await create(service, text='Read `SKILL.md` now.')
+    await execute(service, store, task)
+    turn = browser.pages['p1'][0]
+    turn['user_source_text'] = turn['user_text']
+    turn['user_text'] = turn['user_text'].replace('`SKILL.md`', 'SKILL.md')
+    turn['user_source_text'] = turn['user_source_text'].replace(' now.', ' later.')
+    await service.observe(store.operation(task['message_id']))
+    assert store.operation(task['message_id'])['status'] == 'OUTCOME_UNKNOWN'
+    turn['user_source_text'] = turn['user_source_text'].replace(' later.', ' now.')
+    recovered = await service.dispatch('alice', 'recover_session', {'query_id': task['query_id']})
+    assert recovered['status'] == 'COMPLETED' and len(browser.sent) == 1
+
+
 async def test_restart_at_submission_boundary_does_not_enqueue(rig):
     s, db, fake = rig
     a = await create(s)

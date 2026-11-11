@@ -225,7 +225,7 @@ wheels = [
 
 [[package]]
 name = "ego-chatgpt-bridge"
-version = "0.4.8"
+version = "0.4.9"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

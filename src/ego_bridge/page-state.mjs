@@ -118,6 +118,14 @@ export function readChatPage() {
   const generation_active=Array.from(document.querySelectorAll('form button')).some(e=>visible(e)&&/stop|停止|停止串流/i.test(e.getAttribute('aria-label')||''));
   const turns=Array.from(document.querySelectorAll('[data-talvt-turn-state]')).map(turn=>{
     const user=turn.querySelector('[data-chatgpt-search-message-ids]');
+    const userContent=user?.querySelector('[data-search-result-target]')||user;
+    // Keep rendered history stable and reconstruct inline-code syntax for request reconciliation.
+    const userSource=userContent?.cloneNode(true);
+    for(const code of userSource?.querySelectorAll('code')??[]){
+      if(code.closest('pre'))continue;
+      const raw=codeText(code),fence=codeFence(raw,1);
+      code.replaceWith(fence+raw+fence);
+    }
     const all=Array.from(turn.querySelectorAll('[data-markdown-text-style="assistant-message"]'));
     const candidates=all.filter(e=>visible(e)&&!user?.contains(e)&&!e.closest('[data-markdown-text-tone="tertiary"]'));
     // Search/reasoning progress uses the same markdown attribute. Only answer roots
@@ -162,7 +170,7 @@ export function readChatPage() {
       table_count:responses.reduce((n,e)=>n+e.querySelectorAll('table').length,0),
       blocks:responses.map((e,index)=>({index,message_id:(e.closest('[data-chatgpt-selection-message-id]')||e.querySelector('[data-chatgpt-selection-message-id]'))?.getAttribute('data-chatgpt-selection-message-id')||null,characters:text(e).length}))};
     return {assistant_markdown:render_error?'':joinMarkdown(responses.flatMap((response,index)=>index?['\n\n',markdown(response)]:[markdown(response)])).trim(),extraction,generation_active,render_error,state:turn.getAttribute('data-talvt-turn-state'),user_id:user?.getAttribute('data-chatgpt-search-message-ids')??null,
-      user_text:text(user?.querySelector('[data-search-result-target]')||user),assistant_id:selected?.getAttribute('data-chatgpt-selection-message-id')??null,
+      user_text:text(userContent),user_source_text:text(userSource),assistant_id:selected?.getAttribute('data-chatgpt-selection-message-id')??null,
       assistant_text:answer,sources,external_images,render_ready:!render_error&&!pendingCode&&!!(answer||native_images.some(i=>i.complete&&i.naturalWidth>0)||external_images.length||unsupported_outputs.length)&&native_images.every(i=>i.complete&&i.naturalWidth>0),
       artifacts,unsupported_outputs,final_actions,regenerate:!!turn.querySelector('button[aria-label="重新產生回覆"]'),
       reader_diagnostics:{version:4,pending_code:pendingCode,progress_images_ignored,answer_roots:responses.length,reasoning_nodes_excluded:all.filter(e=>e.closest('[data-markdown-text-tone="tertiary"]')).length,user_controls_excluded:user?.querySelectorAll(ignored).length??0}};
