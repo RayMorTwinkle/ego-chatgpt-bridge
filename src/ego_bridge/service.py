@@ -82,7 +82,6 @@ class Service:
             self.worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self.worker
-        await self.agent_view.stop()
         if hasattr(self.adapter, "close"):
             self.adapter.close()
 
@@ -420,7 +419,6 @@ class Service:
                 raise
             except Exception as error:
                 self.last_worker_error = {"error_code": "WORKER_FAILED", "type": type(error).__name__}
-            self.agent_view.tick()
             self.wake.clear()
             try:
                 await asyncio.wait_for(self.wake.wait(), self.settings.poll_seconds)

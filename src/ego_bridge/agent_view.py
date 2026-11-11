@@ -1,4 +1,4 @@
-"""Small Agent results and bounded, read-only recovery of existing submissions."""
+"""Small Agent results backed by execution-layer state."""
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +11,7 @@ from .uploads import decode_uploads
 
 
 PROGRESS_SECONDS = 10
-POLL_SECONDS = .25
+POLL_SECONDS = 1.0
 
 TOOLS = {'ask','wait','get','list','cancel','get_thread'}
 PHASES = {'QUEUED':'排队中','PREPARING':'发送中','SUBMITTING':'发送中',
@@ -27,10 +27,6 @@ def seconds(value):
 class AgentView:
     def __init__(self, service):
         self.service, self.store = service, service.store
-        self.tasks = {}
-        self.store.db.execute('''CREATE TABLE IF NOT EXISTS agent_recovery(
-            operation_id TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
-            attempts INTEGER NOT NULL, last_attempt REAL NOT NULL, last_error TEXT)''')
 
     def operation(self, owner, args):
         qid=args.get('query_id'); self.store.query(owner,qid)
@@ -39,63 +35,21 @@ class AgentView:
             raise BridgeError('OPERATION_NOT_FOUND','该消息不属于指定会话。')
         return op
 
-    def recovery_tool(self, op):
-        result=op.get('result') or {}
-        if op['status']=='OUTCOME_UNKNOWN' and op['submitted_at'] is not None and op['baseline']:
-            return 'recover_session'
-        if (op['status'] in {'COMPLETED','NEEDS_ATTENTION'} and result.get('completeness_signal')=='complete'
-                and not result.get('delivery_complete',True) and not result.get('unsupported_outputs')):
-            return 'collect_artifacts'
-        return None
-
-    def attempts(self, op):
-        row=self.store.db.execute('SELECT attempts,last_attempt FROM agent_recovery WHERE operation_id=?',(op['id'],)).fetchone()
-        return tuple(row) if row else (0,0)
-
-    def automatic(self, op):
-        return bool(self.recovery_tool(op) and (self.attempts(op)[0]<3 or op['id'] in self.tasks))
-
-    def tick(self):
-        for row in self.store.db.execute("SELECT id FROM operations WHERE status IN ('OUTCOME_UNKNOWN','NEEDS_ATTENTION','COMPLETED')").fetchall():
-            if len(self.tasks)>=self.service.settings.max_active:break
-            op=self.store.operation(row[0]); _,last=self.attempts(op)
-            if self.automatic(op) and op['id'] not in self.tasks and now()-last>=10:
-                self.tasks[op['id']]=asyncio.create_task(self.repair(op))
-
-    async def repair(self, op):
-        try:
-            # Both legacy operations verify the original message and never submit.
-            count,_=self.attempts(op)
-            self.store.db.execute('INSERT OR REPLACE INTO agent_recovery(operation_id,attempts,last_attempt) VALUES(?,?,?)',(op['id'],count+1,now()))
-            value=await self.service.dispatch(op['owner'],self.recovery_tool(op),dict(query_id=op['query_id'],message_id=op['id']))
-            if value.get('error'):
-                self.store.db.execute('UPDATE agent_recovery SET last_error=? WHERE operation_id=?',(json.dumps(value['error'],ensure_ascii=False),op['id']))
-            if (value.get('error') or {}).get('error_code')=='RECOVERY_BUSY':
-                self.store.db.execute('UPDATE agent_recovery SET attempts=? WHERE operation_id=?',(count,op['id']))
-        except Exception as error:
-            detail=BridgeError('AUTO_RECOVERY_FAILED','自动处理遇到执行器异常。',context={'type':type(error).__name__}).data
-            self.store.db.execute('UPDATE agent_recovery SET last_error=? WHERE operation_id=?',(json.dumps(detail,ensure_ascii=False),op['id']))
-        finally:
-            self.tasks.pop(op['id'],None)
-
-    async def stop(self):
-        tasks=list(self.tasks.values())
-        for task in tasks:task.cancel()
-        await asyncio.gather(*tasks,return_exceptions=True)
-
-    async def snapshot(self, owner, op, *, partial=False):
+    async def snapshot(self, owner, op, *, partial=False, thread=False):
         value=await self.service._dispatch(owner,'get_query_result',dict(query_id=op['query_id'],message_id=op['id'],
             compact=False,include_outputs=False,content_format='markdown'))
         result=value.get('result') or {}; state=op['status']
-        automatic=self.automatic(op)
+        retry=value.get('auto_retry') or {}
+        recovering=state=='OUTCOME_UNKNOWN' and retry.get('kind')=='recover' and retry.get('next_at') is not None
         status=('done' if value['complete'] else 'cancelled' if state=='CANCELLED' else 'failed' if state=='FAILED'
-                else 'running' if state not in TERMINAL or automatic else 'needs_you')
+                else 'running' if state not in TERMINAL or recovering else 'needs_you')
         output=dict(ok=True,query_id=op['query_id'],message_id=op['id'],round=op['sequence'],status=status,
             elapsed_seconds=round(max(0,(now() if status=='running' else op['updated_at'])-(op['submitted_at'] or op['created_at'])),1),
             answer_characters=len(result.get('content') or ''))
         if status=='running':
-            output['phase']='收集文件中' if self.recovery_tool(op)=='collect_artifacts' or result.get('delivery_phase')=='COLLECTING_ARTIFACTS' else PHASES.get(state,'核对中')
-            output['next']={'tool':'wait','arguments':{'query_id':op['query_id'],'message_id':op['id'],'timeout_seconds':120}}
+            output['phase']=('收集文件中' if state=='GENERATING' and result.get('completeness_signal')=='complete' and not value['delivery_complete']
+                else '等待自动重试' if state=='QUEUED' and retry.get('next_at') is not None else PHASES.get(state,'核对中'))
+            output['next']={'tool':'wait','arguments':{'query_id':op['query_id'],'message_id':op['id'],'timeout_seconds':50}}
         if status=='done' or partial:output['answer']=result.get('content') or ''
         if partial:output['partial']=bool(value['result_is_partial'])
         files=[{k:a.get(k) for k in ('artifact_id','filename','mime_type','size_bytes','download_url')}
@@ -105,12 +59,22 @@ class AgentView:
         if sources:output['sources']=sources
         if status in {'needs_you','failed'}:
             error=value.get('last_error') or {}
-            recovery=self.store.db.execute('SELECT last_error FROM agent_recovery WHERE operation_id=?',(op['id'],)).fetchone()
-            if recovery and recovery[0]:error=json.loads(recovery[0])
-            code=error.get('error_code','INCOMPLETE_RESULT')
-            action=('请在服务端完成登录或验证后联系维护者恢复原任务，服务端已停止自动处理。' if code in {'LOGIN_REQUIRED','VERIFICATION_REQUIRED'}
-                    else '请联系维护者处理原任务，服务端已停止自动处理，请保留原任务编号。')
+            code=error.get('error_code','INCOMPLETE_RESULT');attempts=retry.get('attempts',0)
+            action=(f'回答已生成，文件补收 {attempts} 次失败；可在 WebUI 重新收集文件。' if code=='ARTIFACT_CAPTURE_FAILED'
+                    else f'服务端已自动重试 {attempts} 次仍失败；修好浏览器/登录问题后可在 WebUI 点重试，或调用旧接口 retry_query。'
+                    if error.get('safe_to_retry') and attempts>=retry.get('max',3) and retry.get('next_at') is None
+                    else '需要在服务端完成登录或验证。' if code in {'LOGIN_REQUIRED','VERIFICATION_REQUIRED'}
+                    else '请把 query_id 交给维护者，服务端不会重发。')
             output['problem']={'code':code,'message':error.get('message','结果尚未完整交付。'),'what_to_do':action}
+        if thread:
+            output.update(raw_status=state,last_error=op['error'],
+                generation_complete=value['generation_complete'],delivery_complete=value['delivery_complete'],
+                delivery_expired=value['delivery_expired'],effort=(op.get('observed') or {}).get('effort',op['payload']['effort']),
+                auto_retry={k:retry.get(k) for k in ('attempts','max','next_at','kind')},
+                progress={k:value['progress'][k] for k in ('answer_characters','source_count')},
+                sources=[{'title':s.get('title'),'url':s['url']} if isinstance(s,dict) else {'title':None,'url':s}
+                         for s in result.get('sources',[]) if isinstance(s,str) or s.get('url')],
+                external_images=result.get('external_images',[]),unsupported_outputs=result.get('unsupported_outputs',[]))
         return output
 
     async def dispatch(self, owner, tool, args, progress=None):
@@ -156,26 +120,25 @@ class AgentView:
         if tool=='get_thread':
             q=self.store.query(owner,op['query_id']);messages=[]
             for row in self.store.db.execute('SELECT id FROM operations WHERE query_id=? ORDER BY sequence',(q['id'],)).fetchall():
-                item=self.store.operation(row[0]);value=await self.snapshot(owner,item,partial=True)
-                messages.append({k:value[k] for k in ('message_id','round','status','answer')} | dict(
+                item=self.store.operation(row[0]);value=await self.snapshot(owner,item,partial=True,thread=True)
+                messages.append({k:value[k] for k in ('message_id','round','status','answer','raw_status','last_error','generation_complete','delivery_complete',
+                    'delivery_expired','effort','auto_retry','progress','external_images','unsupported_outputs')} | dict(
                     phase=value.get('phase'),prompt=item['payload']['text'],attachments=item['payload'].get('attachments',[]),
                     partial=value['partial'],files=value.get('files',[]),sources=value.get('sources',[]),problem=value.get('problem'),
                     created_at=item['created_at'],updated_at=item['updated_at']))
-            return dict(ok=True,query_id=q['id'],title=messages[0]['prompt'][:160],conversation_url=q['conversation_url'],status=messages[-1]['status'],messages=messages)
+            return dict(ok=True,query_id=q['id'],title=messages[0]['prompt'][:160],chat_title=q['chat_title'],conversation_url=q['conversation_url'],status=messages[-1]['status'],messages=messages)
         if tool=='cancel':
             await self.service._dispatch(owner,'cancel_query',dict(query_id=op['query_id'],message_id=op['id']))
             return await self.snapshot(owner,self.store.operation(op['id']))
         if tool=='get' and args.get('verbose',False):
             return await self.service._dispatch(owner,'get_query_result',dict(query_id=op['query_id'],message_id=op['id'],compact=False))
         if tool=='wait':
-            timeout=seconds(args.get('timeout_seconds',120));loop=asyncio.get_running_loop()
+            timeout=seconds(args.get('timeout_seconds',50));loop=asyncio.get_running_loop()
             start=loop.time();deadline=start+timeout;last=start
             while True:
-                self.tick()
                 value=await self.snapshot(owner,self.store.operation(op['id']))
                 if value['status']!='running' or loop.time()>=deadline:return value
                 if progress and loop.time()-last>=PROGRESS_SECONDS:
                     await progress(loop.time()-start,value.get('phase','处理中'));last=loop.time()
                 await asyncio.sleep(min(POLL_SECONDS,max(0,deadline-loop.time())))
-        self.tick()
         return await self.snapshot(owner,op)

@@ -13,8 +13,16 @@ INSTRUCTIONS = ('用 ask 新建研究或在原 query_id 追问。'
     '用 read_artifact 读取文件；回答质量和来源请自行核验。')
 
 
+def done_text(value):
+    # Text-only clients still need the ids to follow up and fetch files.
+    lines=[value.get('answer',''),'','---',f"query_id: {value['query_id']} · 第 {value['round']} 轮 · 追问用 ask(query_id=...)"]
+    lines+=[f"文件：{f['filename']}（{f['artifact_id']}，用 read_artifact 读取）" for f in value.get('files',[])]
+    if value.get('sources'):lines.append('来源：'+' '.join(value['sources'][:20]))
+    return '\n'.join(lines)
+
+
 def envelope(value):
-    text=('状态：done\n'+value.get('answer','') if value.get('status')=='done' and 'answer' in value
+    text=(done_text(value) if value.get('status')=='done' and 'answer' in value
           else json.dumps(value,ensure_ascii=False,separators=(',',':')))
     return types.CallToolResult(content=[types.TextContent(type='text',text=text)],
         structuredContent=value,isError=not value.get('ok',False))
@@ -35,7 +43,7 @@ def register(mcp, dispatch, attachments_type):
 
     @mcp.tool(structured_output=False,description='等待最终回答和文件；仍在运行时返回简短进度，继续按 next 等待。')
     async def wait(query_id: str, ctx: Context, message_id: str | None = None,
-                   timeout_seconds: Annotated[float,Field(description='等待秒数，0..300，默认 120。')] = 120) -> types.CallToolResult:
+                   timeout_seconds: Annotated[float,Field(description='等待秒数，0..300，默认 50；客户端工具超时较长时可调大。')] = 50) -> types.CallToolResult:
         return await call(ctx,'wait',dict(query_id=query_id,message_id=message_id,timeout_seconds=timeout_seconds))
 
     @mcp.tool(structured_output=False,description='读取简短结果；verbose=true 可查看完整记录。')

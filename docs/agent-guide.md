@@ -5,15 +5,15 @@
 ## 最短调用路径
 
 ```json
-{"tool":"ask","arguments":{"text":"比较两个候选方案并注明来源。","wait_seconds":120}}
+{"tool":"ask","arguments":{"text":"比较两个候选方案并注明来源。","wait_seconds":50}}
 ```
 
-返回 `status=running` 时，照着 `next.tool` 和 `next.arguments` 继续调用 `wait`。默认每次等 120 秒，最多 300 秒；一次研究可能超过 10 分钟。等待期间不返回正文，带 MCP progressToken 的请求约每 10 秒收到进度通知。超时只结束本次等待，后台任务继续。
+返回 `status=running` 时，照着 `next.tool` 和 `next.arguments` 继续调用 `wait`。默认每次等 50 秒，最多 300 秒；一次研究可能超过 10 分钟。等待期间不返回正文，带 MCP progressToken 的请求约每 10 秒收到进度通知。超时只结束本次等待，后台任务继续。
 
 `status=done` 时直接读取 `answer`（Markdown）和 `files`，不需要再调用 `get`。`get(query_id)` 可随时查看精简状态，`get(query_id, verbose=true)` 返回旧版完整记录。需要继续追问时：
 
 ```json
-{"tool":"ask","arguments":{"query_id":"q_...","text":"继续比较成本。","wait_seconds":120}}
+{"tool":"ask","arguments":{"query_id":"q_...","text":"继续比较成本。","wait_seconds":50}}
 ```
 
 保存返回的 `query_id` 和 `message_id`；指定 `message_id` 可查看或等待某一轮，省略时在调用开始时选定最新一轮。

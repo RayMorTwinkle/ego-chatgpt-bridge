@@ -59,10 +59,10 @@ MCP Streamable HTTP：`http://<已配置地址>:8766/mcp`。HTTP 工具：`POST 
 默认 MCP 只有七个工具：`ask`、`wait`、`get`、`list`、`read_artifact`、`cancel`、`diagnose`。最短路径：
 
 ```json
-{"tool":"ask","arguments":{"text":"比较两个候选方案并注明来源。","wait_seconds":120}}
+{"tool":"ask","arguments":{"text":"比较两个候选方案并注明来源。","wait_seconds":50}}
 ```
 
-返回 `running` 时按 `next` 调用 `wait`（默认 120 秒，上限 300 秒）；有 progressToken 时约每 10 秒发送进度。`done` 直接带 Markdown 正文和文件，不必再 get。追问用 `ask(query_id="q_...", text="继续比较成本。")`。服务端自动核对发送结果和补收文件；`needs_you` 时按 `problem.what_to_do` 处理。
+返回 `running` 时按 `next` 调用 `wait`（默认 50 秒，上限 300 秒）；有 progressToken 时约每 10 秒发送进度。`done` 直接带 Markdown 正文和文件，不必再 get。追问用 `ask(query_id="q_...", text="继续比较成本。")`。服务端自动核对发送结果和补收文件；`needs_you` 时按 `problem.what_to_do` 处理。
 
 request_id 可省略：同身份、同输入 query_id、相同文本和附件 SHA-256，复用未终止或 10 分钟内创建的操作。显式 request_id 沿用永久幂等键语义。`get(verbose=true)` 可查看完整旧记录。详情见 [Agent 使用说明](docs/agent-guide.md)。
 

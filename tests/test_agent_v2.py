@@ -83,12 +83,22 @@ async def test_compact_result_markdown_thread_and_verbose(rig):
     assert not {'execution_context','content_sha256','complete','extraction'} & done.keys()
     old=await s.dispatch('alice','get_query_result',{**args,'compact':False})
     assert await s.dispatch('alice','get',{**args,'verbose':True})==old
+    db.db.execute('UPDATE queries SET chat_title=? WHERE id=?',('服务端标题',a['query_id']))
     second=await ask(s,query_id=a['query_id'],text='接着解释。')
     thread=await s.dispatch('alice','get_thread',args)
     assert thread['title']=='你好，请回答。' and thread['status']=='running'
     assert [m['round'] for m in thread['messages']]==[1,2]
     assert thread['messages'][0]['answer']==done['answer'] and not thread['messages'][0]['partial']
-    assert thread['messages'][1]['prompt']=='接着解释。'
+    assert thread['messages'][1]['prompt']=='接着解释。' and thread['chat_title']=='服务端标题'
+    first,pending=thread['messages']
+    assert first['raw_status']=='COMPLETED' and first['last_error'] is None
+    assert first['generation_complete'] and first['delivery_complete'] and not first['delivery_expired']
+    assert first['effort']=='extra_high' and first['progress']==dict(answer_characters=len('这是本次测试的简短回答。'),source_count=1)
+    assert first['sources']==[{'title':'example','url':'https://example.com'}]
+    assert first['external_images']==first['unsupported_outputs']==[]
+    assert pending['raw_status']=='QUEUED' and not pending['generation_complete'] and not pending['delivery_complete']
+    assert pending['auto_retry']==dict(attempts=0,max=3,next_at=None,kind=None)
+    assert pending['progress']==dict(answer_characters=0,source_count=0)
     legacy_list=await s.dispatch('alice','list_queries',{})
     assert legacy_list['queries'][0]['rounds']==2
     listed=await s.dispatch('alice','list',{'status':'running'})
@@ -97,7 +107,20 @@ async def test_compact_result_markdown_thread_and_verbose(rig):
     print('V2_TEST_JSON '+json.dumps({'ask_input':{'text':'你好，请回答。'},'ask_output':a,'wait_input':{**args,'timeout_seconds':0},'wait_output':done},ensure_ascii=False))
 
 
-async def test_wait_pins_round_and_ask_can_wait(rig):
+async def test_thread_preserves_media_references_and_observed_effort(rig):
+    s,db,b=rig;a=await ask(s);await finish(s,db,a)
+    op=db.operation(a['message_id']);result=dict(op['result'])
+    result.update(external_images=[{'title':'diagram','url':'https://example.com/image.png','delivery':'reference_only'}],
+        unsupported_outputs=[{'kind':'video','export_status':'UNSUPPORTED'}])
+    db.transition(op['id'],op['status'],result=result)
+    db.patch(op['id'],observed={**op['observed'],'effort':'high'})
+    message=(await s.dispatch('alice','get_thread',{'query_id':a['query_id']}))['messages'][0]
+    assert message['external_images']==result['external_images'] and message['unsupported_outputs']==result['unsupported_outputs']
+    assert message['effort']=='high' and len(b.sent)==1
+
+
+async def test_wait_pins_round_and_ask_can_wait(rig,monkeypatch):
+    monkeypatch.setattr(agent_view,'POLL_SECONDS',.005)
     s,db,b=rig
     async def complete_later():
         await asyncio.sleep(.02)
@@ -140,27 +163,32 @@ async def test_timeout_300_accepted_and_no_running_body_progress(rig,monkeypatch
     assert all(phase=='排队中' for _,phase in events) and events==sorted(events)
 
 
-async def test_auto_recover_never_resends_and_bounded_budget(rig):
+async def test_auto_recover_never_resends_and_bounded_budget(rig,monkeypatch):
+    clock=[1000.0];monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
     s,db,b=rig;b.crash_after_send=True
     a=await ask(s);await s.execute(db.operation(a['message_id']))
-    assert (await s.dispatch('alice','get',{'query_id':a['query_id']}))['phase']=='核对中'
-    await asyncio.gather(*s.agent_view.tasks.values())
+    assert db.operation(a['message_id'])['auto_retry']['kind']=='recover'
+    await s.automatic_recovery()
+    value=await s.dispatch('alice','get',{'query_id':a['query_id']})
+    assert value['status']=='running' and value['phase']=='核对中'
+    clock[0]+=15;await s.automatic_recovery()
     assert (await s.dispatch('alice','wait',{'query_id':a['query_id'],'timeout_seconds':0}))['status']=='done'
     assert len(b.sent)==1
     bad=await ask(s,text='broken');await s.execute(db.operation(bad['message_id']))
     b.pages['p2'].append(dict(b.pages['p2'][0]))
-    for _ in range(3):
-        db.db.execute('UPDATE agent_recovery SET last_attempt=0 WHERE operation_id=?',(bad['message_id'],))
-        s.agent_view.tick();await asyncio.gather(*s.agent_view.tasks.values())
+    await s.automatic_recovery();clock[0]+=15;await s.automatic_recovery()
     value=await s.dispatch('alice','get',{'query_id':bad['query_id']})
-    assert value['status']=='needs_you' and '已停止自动处理' in value['problem']['what_to_do']
-    assert len(b.sent)==2 and s.agent_view.attempts(db.operation(bad['message_id']))[0]==3
-    fresh=Service(s.settings,db,b);fresh.agent_view.tick()
-    assert not fresh.agent_view.tasks
+    assert value['status']=='needs_you' and '服务端不会重发' in value['problem']['what_to_do']
+    retry=db.operation(bad['message_id'])['auto_retry']
+    assert retry['attempts']==retry['max']==1 and retry['next_at'] is None
+    fresh=Service(s.settings,db,b);await fresh.automatic_recovery()
+    assert db.operation(bad['message_id'])['auto_retry']==retry and len(b.sent)==2
+    assert not db.db.execute("SELECT name FROM sqlite_master WHERE name='agent_recovery'").fetchall()
     await fresh.stop()
 
 
-async def test_auto_collect_files_and_no_resend(tmp_path):
+async def test_auto_collect_files_and_no_resend(tmp_path,monkeypatch):
+    clock=[1000.0];monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
     db=Store(tmp_path);b=FileBrowser(b'invalid');s=Service(Settings(tmp_path,completion_confirm_seconds=0),db,b)
     try:
         a=await ask(s);await s.execute(db.operation(a['message_id']))
@@ -168,8 +196,12 @@ async def test_auto_collect_files_and_no_resend(tmp_path):
         await s.observe(db.operation(a['message_id']))
         value=await s.dispatch('alice','get',{'query_id':a['query_id']})
         assert value['status']=='running' and value['phase']=='收集文件中' and 'answer' not in value
+        thread=await s.dispatch('alice','get_thread',{'query_id':a['query_id']})
+        message=thread['messages'][0]
+        assert message['generation_complete'] and not message['delivery_complete'] and not message['delivery_expired']
+        assert message['raw_status']=='GENERATING' and message['auto_retry']==dict(attempts=1,max=3,next_at=1015.0,kind='artifact')
         b.data=PNG
-        await asyncio.gather(*s.agent_view.tasks.values())
+        clock[0]+=15;await s.observe(db.operation(a['message_id']))
         done=await s.dispatch('alice','get',{'query_id':a['query_id']})
         assert done['status']=='done' and done['files'][0]['size_bytes']==len(PNG)
         assert set(done['files'][0])=={'artifact_id','filename','mime_type','size_bytes','download_url'}
@@ -206,7 +238,7 @@ async def test_default_and_legacy_mcp_catalog_and_single_text_channel(tmp_path,l
                     a=await session.call_tool('ask',{'text':'SDK test'})
                     assert len(a.content)==1 and json.loads(a.content[0].text)==a.structuredContent
                     done=await session.call_tool('wait',{'query_id':a.structuredContent['query_id'],'timeout_seconds':1})
-                    assert done.structuredContent['status']=='done' and done.content[0].text=='状态：done\nanswer'
+                    assert done.structuredContent['status']=='done' and done.content[0].text.startswith('answer\n\n---\nquery_id: '+done.structuredContent['query_id'])
                     denied=await session.call_tool('get',{'query_id':'missing'})
                     assert denied.isError and denied.structuredContent['problem']['code']=='QUERY_NOT_FOUND'
             # Existing REST names remain available regardless of MCP registration.
@@ -235,14 +267,16 @@ async def test_progress_token_receives_mcp_sse_notifications(tmp_path,monkeypatc
                     assert all('partial' not in str(event) for event in events)
 
 
-async def test_worker_recovers_without_agent_polling(rig):
+async def test_worker_recovers_without_agent_polling(rig,monkeypatch):
+    clock=[1000.0];monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
     s,db,b=rig;b.crash_after_send=True
     a=await ask(s)
     await s.start()
     try:
         async with asyncio.timeout(1):
-            while db.operation(a['message_id'])['status']!='COMPLETED':await asyncio.sleep(.01)
-        assert len(b.sent)==1 and s.agent_view.attempts(db.operation(a['message_id']))[0]==1
+            while db.operation(a['message_id'])['status']!='COMPLETED':
+                clock[0]+=15;await asyncio.sleep(.01)
+        assert len(b.sent)==1 and db.operation(a['message_id'])['auto_retry']['attempts']==1
     finally:await s.stop()
 
 
@@ -252,30 +286,61 @@ async def test_failure_states_and_recovery_refuses_unsent_operations(rig):
     await s.execute(db.operation(a['message_id']))
     value=await s.dispatch('alice','get',{'query_id':a['query_id']})
     assert value['status']=='needs_you' and value['problem']['code']=='LOGIN_REQUIRED'
-    s.agent_view.tick();assert not s.agent_view.tasks and not b.sent
+    assert not b.sent
     db.db.execute("UPDATE operations SET status='FAILED' WHERE id=?",(a['message_id'],))
     value=await s.dispatch('alice','get',{'query_id':a['query_id']})
     assert value['status']=='failed'
     db.db.execute("UPDATE operations SET status='OUTCOME_UNKNOWN' WHERE id=?",(a['message_id'],))
-    s.agent_view.tick();assert not s.agent_view.tasks
     assert (await s.dispatch('alice','get',{'query_id':a['query_id']}))['status']=='needs_you'
 
 
-async def test_recovery_failure_details_survive_and_delete_cascades(rig):
-    s,db,b=rig;b.crash_after_send=True
-    a=await ask(s);await s.execute(db.operation(a['message_id']))
-    original=b.call
-    async def fail(action,**kw):
-        if action=='recover':raise RuntimeError('injected')
-        return await original(action,**kw)
-    b.call=fail
-    for _ in range(3):
-        db.db.execute('UPDATE agent_recovery SET last_attempt=0 WHERE operation_id=?',(a['message_id'],))
-        s.agent_view.tick();await asyncio.gather(*s.agent_view.tasks.values())
+@pytest.mark.parametrize('state,retry,status,phase',[
+    ('QUEUED',None,'running','排队中'),
+    ('QUEUED',{'kind':'prepare','next_at':0},'running','等待自动重试'),
+    ('PREPARING',None,'running','发送中'),
+    ('SUBMITTING',None,'running','发送中'),
+    ('WAITING_FOR_RESPONSE',None,'running','思考中'),
+    ('GENERATING',None,'running','生成中'),
+    ('OUTCOME_UNKNOWN',{'kind':'recover','next_at':0},'running','核对中'),
+    ('OUTCOME_UNKNOWN',{'kind':'recover','next_at':None},'needs_you',None),
+    ('OUTCOME_UNKNOWN',{'kind':'artifact','next_at':1000},'needs_you',None),
+    ('NEEDS_ATTENTION',{'kind':'artifact','next_at':1000},'needs_you',None),
+    ('CANCELLED',None,'cancelled',None),
+    ('FAILED',None,'failed',None),
+])
+async def test_execution_state_mapping_has_no_recovery_side_effects(rig,state,retry,status,phase):
+    s,db,b=rig;a=await ask(s)
+    db.db.execute('UPDATE operations SET status=? WHERE id=?',(state,a['message_id']))
+    db.patch(a['message_id'],auto_retry=retry)
+    args={'query_id':a['query_id'],'timeout_seconds':0}
+    for tool in ('get','wait'):
+        value=await s.dispatch('alice',tool,args)
+        assert value['status']==status and value.get('phase')==phase
+    assert db.operation(a['message_id'])['auto_retry']==retry and not b.sent
+
+
+@pytest.mark.parametrize('code,safe,attempts,action',[
+    ('EGO_UNAVAILABLE',True,3,'服务端已自动重试 3 次仍失败；修好浏览器/登录问题后可在 WebUI 点重试，或调用旧接口 retry_query'),
+    ('ARTIFACT_CAPTURE_FAILED',False,3,'回答已生成，文件补收 3 次失败；可在 WebUI 重新收集文件'),
+    ('LOGIN_REQUIRED',True,0,'需要在服务端完成登录或验证'),
+    ('VERIFICATION_REQUIRED',False,0,'需要在服务端完成登录或验证'),
+    ('UNKNOWN',False,0,'请把 query_id 交给维护者，服务端不会重发'),
+    ('EGO_UNAVAILABLE',True,2,'请把 query_id 交给维护者，服务端不会重发'),
+])
+async def test_problem_actions_and_thread_raw_error(rig,code,safe,attempts,action):
+    s,db,b=rig;a=await ask(s)
+    error={'error_code':code,'message':'injected','safe_to_retry':safe}
+    db.transition(a['message_id'],'NEEDS_ATTENTION',error=error)
+    db.patch(a['message_id'],auto_retry=dict(kind='artifact' if code=='ARTIFACT_CAPTURE_FAILED' else 'prepare',
+        attempts=attempts,max=3,next_at=None,history=[{'error':error}]))
     value=await s.dispatch('alice','get',{'query_id':a['query_id']})
-    assert value['status']=='needs_you' and value['problem']['code']=='AUTO_RECOVERY_FAILED'
-    deleted=await s.dispatch('alice','delete_query',{'query_id':a['query_id']})
-    assert deleted['ok'] and not db.db.execute('SELECT * FROM agent_recovery').fetchall()
+    assert action in value['problem']['what_to_do']
+    thread=await s.dispatch('alice','get_thread',{'query_id':a['query_id']})
+    message=thread['messages'][0]
+    assert message['last_error']==db.operation(a['message_id'])['error'] and message['last_error']['safe_to_retry']==safe
+    assert message['raw_status']=='NEEDS_ATTENTION' and message['auto_retry']==dict(
+        kind='artifact' if code=='ARTIFACT_CAPTURE_FAILED' else 'prepare',attempts=attempts,max=3,next_at=None)
+    assert not b.sent
 
 
 async def test_invalid_query_never_creates_and_explicit_message_reads_old_round(rig):
