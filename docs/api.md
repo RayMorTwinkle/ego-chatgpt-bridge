@@ -25,7 +25,7 @@ MCP `/mcp`、HTTP `POST /api/<tool>`、CLI 和 stdio 共用同一 Service。网�
 | get_artifact | artifact_id | 当前身份的单个产物元数据 |
 | read_artifact | artifact_id | 可选 inline_image；小图片原生 ImageContent，其他为 ResourceLink |
 
-text 为 1..100000 字符，request_id 为 1..200 字符。默认 soft_timeout=600、hard_timeout=3600 秒，需 `1 <= soft <= hard <= 86400`。每身份最多 100 条等待消息。MCP 和研究提交入口请求体上限为 8 MiB，其他普通 API 为 1 MiB。
+text 为 1..100000 字符，request_id 为 1..200 字符。默认 soft_timeout=600、hard_timeout=3600 秒，需 `1 <= soft <= hard <= 86400`。每身份最多 100 条等待消息。MCP 和研究提交入口请求体上限为 56 MiB，其他普通 API 为 1 MiB。
 
 Query ID 对应一个 Conversation；Message ID 对应一次输入／响应。幂等键属于调用方：同键同参数复用原操作，异参冲突。发送文本带内部请求标记以便页面对账，这不是网页服务端提供的幂等键。
 
@@ -47,9 +47,9 @@ WebUI 的「新建研究」和「在此会话继续研究」可选本机文件�
 {"text":"读取附件并总结。","request_id":"research-with-file-01","attachments":[{"filename":"notes.txt","content_base64":"aGVsbG8K"}]}
 ```
 
-每轮最多 4 个非空文件，原始字节合计最多 5 MiB。`filename` 是文件名，`content_base64` 是原始字节的标准 Base64 编码。文件类型由 ChatGPT 网页决定。幂等核对包含文件名与 SHA-256，状态响应只回传附件元数据。通过网页上传并核对后才提交本轮消息，网页拒收时保留可安全重试的发送前状态。
+每轮最多 4 个非空文件，原始字节合计最多 40 MiB。`filename` 是文件名，`content_base64` 是原始字节的标准 Base64 编码。文件类型由 ChatGPT 网页决定。幂等核对包含文件名与 SHA-256，状态响应只回传附件元数据。通过网页上传并核对后才提交本轮消息，网页拒收时保留可安全重试的发送前状态。
 
-附件字节在排队及发送前故障时私有暂存，进入提交或取消排队后删除暂存记录。暂存总量最多 50 MiB。备份可能包含快照当时尚在暂存的附件。ChatGPT 中的附件随远端会话管理。
+附件字节在排队及发送前故障时私有暂存，进入提交或取消排队后删除暂存记录。暂存总量最多 400 MiB。备份可能包含快照当时尚在暂存的附件。ChatGPT 中的附件随远端会话管理。
 
 ## 结果
 

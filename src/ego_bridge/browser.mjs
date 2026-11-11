@@ -73,7 +73,7 @@ async function uploadAttachments(page, paths, names) {
       const labels=Array.from(group?.querySelectorAll('button[aria-label]')??[],b=>b.getAttribute('aria-label'));
       return files.every(name=>labels.includes('移除 '+name)||labels.includes('Remove '+name)) &&
         !group?.querySelector('[role="progressbar"]');
-    },names,{timeout:35000});
+    },names,{timeout:90000});
   } catch(error) {
     fail('ATTACHMENT_UPLOAD_FAILED','网页上传失败或未及时显示附件；未发送。请检查网页草稿。','prepare');
   }

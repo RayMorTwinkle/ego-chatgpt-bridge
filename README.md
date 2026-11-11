@@ -73,7 +73,7 @@ CLI 原始文件下载（不会覆盖已有文件，校验大小和 SHA-256）�
 
 stdio 客户端使用 `~/apps/ego-chatgpt-bridge/.venv/bin/ego-bridge stdio`，共用后台服务，不创建第二个浏览器执行器。
 
-新建研究和追问可在 WebUI 选择附件，也可通过 `create_query` / `continue_query` 的 `attachments` 参数提交。每轮最多 4 个文件，合计 5 MiB。格式见 [研究附件](docs/api.md#研究附件)。
+新建研究和追问可在 WebUI 选择附件，也可通过 `create_query` / `continue_query` 的 `attachments` 参数提交。每轮最多 4 个文件，合计 40 MiB。格式见 [研究附件](docs/api.md#研究附件)。
 
 `--wait` 只是等待；退出客户端不取消后台任务。每个调用身份只能访问自己的任务和产物。主身份可通过 WebUI 执行账户级调试导出，额外 Agent 身份没有该权限。
 

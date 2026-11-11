@@ -13,8 +13,8 @@ async function api(path,data,method){const options={credentials:'same-origin',me
 const tool=(name,args={})=>api('tool/'+name,args);
 async function attachments(id){
   const files=Array.from($(id).files);
-  if(files.length>4||files.reduce((total,file)=>total+file.size,0)>5*1024*1024||files.some(file=>!file.size))
-    throw Error('请选择最多 4 个非空附件，合计不得超过 5 MiB。');
+  if(files.length>4||files.reduce((total,file)=>total+file.size,0)>40*1024*1024||files.some(file=>!file.size))
+    throw Error('请选择最多 4 个非空附件，合计不得超过 40 MiB。');
   return Promise.all(files.map(file=>new Promise((resolve,reject)=>{
     const reader=new FileReader();
     reader.onload=()=>resolve({filename:file.name,content_base64:reader.result.split(',')[1]});

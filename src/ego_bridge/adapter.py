@@ -68,7 +68,8 @@ class EgoAdapter:
             except FileNotFoundError:
                 raise BridgeError("EGO_UNAVAILABLE", "找不到已安装的 ego-browser CLI。", stage=action, action=True, safe=action != "submit")
             try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(script.encode()), s.browser_timeout)
+                timeout = max(180, s.browser_timeout) if action == 'prepare' and arguments.get('attachment_paths') else s.browser_timeout
+                stdout, stderr = await asyncio.wait_for(process.communicate(script.encode()), timeout)
             except (TimeoutError, asyncio.CancelledError) as exc:
                 process.kill()
                 await process.communicate()

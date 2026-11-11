@@ -52,7 +52,7 @@ class Attachment(BaseModel):
     content_base64: Annotated[str, Field(description='原始檔案位元組的標準 Base64 編碼。')]
 
 
-Attachments = Annotated[list[Attachment], Field(max_length=MAX_FILES, description='本輪附件。原始大小合計最多 5 MiB。')]
+Attachments = Annotated[list[Attachment], Field(max_length=MAX_FILES, description='本輪附件。原始大小合計最多 40 MiB。')]
 
 
 class TokenAuth:
@@ -187,6 +187,7 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
         ),
         stateless_http=True,
         json_response=True,
+        max_request_body_size=MAX_REQUEST_BYTES,
         transport_security=security,
     )
     mcp._mcp_server.version = version("ego-chatgpt-bridge")

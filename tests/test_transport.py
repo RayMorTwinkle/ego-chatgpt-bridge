@@ -30,6 +30,18 @@ async def test_auth_host_origin_and_body_boundaries(tmp_path):
             assert r.json()['error']['error_code']=='QUERY_NOT_FOUND'
 
 
+async def test_mcp_accepts_attachment_body_above_sdk_default_limit(tmp_path):
+    app=build_app(Settings(tmp_path),adapter=FakeBrowser(),clients={'alice':'a'*40})
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),headers={'Authorization':'Bearer '+'a'*40}) as http:
+            async with streamable_http_client('https://localhost/mcp',http_client=http) as (read,write,_):
+                async with ClientSession(read,write) as session:
+                    await session.initialize()
+                    result=await session.call_tool('create_query',{'text':'','request_id':'large-body-validation',
+                        'attachments':[{'filename':'large.bin','content_base64':'eA=='*(1024*1024+1)}]})
+                    assert result.structuredContent['error']['error_code']=='INVALID_ARGUMENT'
+
+
 async def test_real_sdk_handshake_tools_and_owner_context(tmp_path, caplog):
     caplog.set_level(logging.INFO, logger="ego_bridge.submission")
     app=build_app(Settings(tmp_path),adapter=FakeBrowser(),clients={'alice':'a'*40})
