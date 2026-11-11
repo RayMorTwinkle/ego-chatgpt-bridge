@@ -153,14 +153,16 @@ function fromLegacy(message,r){
     effort:message.requested_effort,retry:r?.auto_retry||null};
 }
 function fromThread(t){
-  return {title:t.chat_title||null,url:t.conversation_url||null,rounds:(t.rounds||t.messages||[]).map((m,n)=>({
-    id:m.message_id,seq:m.round||m.sequence||n+1,status:m.raw_status||m.status,prompt:m.prompt||m.text||'',attachments:m.attachments||[],
-    answer:m.answer||'',partial:!!m.partial,sources:m.sources||[],images:m.external_images||[],files:m.files||m.artifacts||[],unsupported:m.unsupported_outputs||[],
-    error:m.problem?{error_code:m.problem.code,message:m.problem.message,what_to_do:m.problem.what_to_do,safe_to_retry:m.problem.safe_to_retry}:m.last_error||null,
-    genDone:m.generation_complete??m.status==='done',delivered:m.delivery_complete??m.status==='done',expired:!!m.delivery_expired,
-    created:m.created_at,updated:m.updated_at,progress:m.progress||{answer_characters:m.answer_characters},effort:m.effort||m.requested_effort,
-    phase:m.phase,retry:m.auto_retry||null}))};
+  return {title:t.chat_title||null,url:t.conversation_url||null,rounds:(t.messages||[]).map(m=>({
+    id:m.message_id,seq:m.round,status:m.raw_status||m.status,agent:m.status,phase:m.status==='running'?m.phase:null,
+    prompt:m.prompt||'',attachments:m.attachments||[],answer:m.answer||'',partial:!!m.partial,sources:m.sources||[],
+    images:m.external_images||[],files:(m.files||[]).map(f=>({status:'AVAILABLE',...f})),unsupported:m.unsupported_outputs||[],
+    error:m.last_error||(m.problem?{error_code:m.problem.code,message:m.problem.message}:null),problem:m.problem||null,
+    genDone:!!m.generation_complete,delivered:!!m.delivery_complete,expired:!!m.delivery_expired,
+    created:m.created_at,updated:m.updated_at,progress:m.progress||{},effort:m.effort,retry:m.auto_retry||null}))};
 }
+// Rounds from get_thread carry the server's own five-state view (it knows about pending automatic retries).
+function kindOf(r){return r.agent?kind(r.agent):kind(r.status);}
 async function fetchThread(qid,previous){
   try{return fromThread(await tool('get_thread',{query_id:qid}));}
   catch(error){if(error.code!=='UNKNOWN_TOOL')throw error;}
@@ -168,7 +170,7 @@ async function fetchThread(qid,previous){
   const old=new Map((previous?.rounds||[]).map(r=>[r.id,r]));
   const rounds=await Promise.all(messages.map(async m=>{
     const prior=old.get(m.message_id);
-    if(prior&&kind(prior.status)!=='running'&&prior.updated===m.updated_at&&prior.status===m.status)return prior;
+    if(prior&&kindOf(prior)!=='running'&&prior.updated===m.updated_at&&prior.status===m.status)return prior;
     const r=await tool('get_query_result',{query_id:qid,message_id:m.message_id,content_format:'markdown',include_outputs:false}).catch(()=>null);
     return fromLegacy(m,r);
   }));
@@ -200,12 +202,12 @@ function renderHead(){
   const q=currentQuery(),t=state.thread,last=t?.rounds.at(-1);
   const title=t?.title||titleOf(q)||(t?.rounds[0]?smartTitle(t.rounds[0].prompt):'研究');
   $('thread-title').textContent=title;document.title=title+' · Ego 研究';
-  const status=last?.status||q?.status,k=kind(status);
+  const status=last?.status||q?.status,k=last?kindOf(last):kind(status);
   const el=$('thread-status');el.className='status-text s-'+k;
   el.textContent=k==='running'?(last?.phase||PHASE[status]||'进行中'):k==='done'?((t?.rounds.length||0)>1?t.rounds.length+' 轮':''):KIND_LABEL[k];
   const url=t?.url||q?.conversation_url;$('conversation-link').hidden=!url;if(url)$('conversation-link').href=url;
 }
-function signature(r){return [r.status,r.answer.length,r.files.map(f=>f.status).join(),r.error?.error_code||'',r.updated,r.retry?.attempts||''].join('|');}
+function signature(r){return [r.status,r.agent,r.phase,r.answer.length,r.files.map(f=>f.status).join(),r.error?.error_code||'',r.updated,r.retry?.attempts||''].join('|');}
 function renderThread(scrollToLatest){
   const box=$('thread'),scroller=$('scroller');
   const nearBottom=scroller.scrollHeight-scroller.scrollTop-scroller.clientHeight<160;
@@ -220,13 +222,14 @@ function renderThread(scrollToLatest){
   if(scrollToLatest){
     const last=box.lastElementChild;
     scroller.scrollTop=last&&state.thread.rounds.length>1?last.offsetTop-12:0;
-  }else if(nearBottom&&kind(state.thread.rounds.at(-1)?.status)==='running')scroller.scrollTop=scroller.scrollHeight;
+  }else if(nearBottom&&state.thread.rounds.length&&kindOf(state.thread.rounds.at(-1))==='running')scroller.scrollTop=scroller.scrollHeight;
   tick();
 }
 
 function renderRound(r){
-  const turn=node('article',undefined,'turn'),k=kind(r.status);
+  const turn=node('article',undefined,'turn'),k=kindOf(r);
   turn.append(renderAsk(r));
+  if(k==='attention'||k==='failed')turn.append(problemCard(r));
   if(r.answer){const md=node('div',undefined,'answer md');md.append(window.renderMarkdown(r.answer));turn.append(md);}
   else if(k==='running'){
     const wait=node('div',undefined,'waiting');wait.append(node('span',undefined,'pulse'));
@@ -234,7 +237,6 @@ function renderRound(r){
     if(r.retry?.attempts)text.append(' · 自动重试第 '+r.retry.attempts+' 次');
     wait.append(text);turn.append(wait);
   }else if(k==='done')turn.append(node('p','这一轮没有文字回答。','answer muted'));
-  if(k==='attention'||k==='failed')turn.append(problemCard(r));
   if(r.unsupported.length)turn.append(node('p',r.unsupported.map(o=>o.kind).join('、')+' 这类预览还不能导出原始内容。','notice'));
   if(r.files.length)turn.append(renderFiles(r));
   const sources=[...r.sources,...r.images.map(i=>({...i,title:'引用图片 · '+(i.title||'图片')}))];
@@ -259,7 +261,7 @@ function tick(){for(const el of document.querySelectorAll('[data-since]'))el.tex
 setInterval(tick,1000);
 
 function problemCard(r){
-  const e=r.error||{},k=kind(r.status),box=node('div',undefined,'problem'+(k==='failed'?' failed':''));
+  const e=r.error||{},k=kindOf(r),box=node('div',undefined,'problem'+(k==='failed'?' failed':''));
   let title,hint='',actions=[];
   if(r.genDone&&!r.delivered){
     title=r.expired?'部分文件已过保留期':'回答已生成，有文件没取回来';
@@ -271,7 +273,7 @@ function problemCard(r){
   }else if(k==='failed')title='这一轮失败了';
   else{title='需要你看一下';actions.push(['核对网页','recover_session']);}
   box.append(node('div',title,'problem-title'));
-  const detail=[e.message,e.what_to_do||hint].filter(Boolean).join(' ');
+  const detail=[r.problem?.message||e.message,r.problem?.what_to_do||e.what_to_do||hint].filter(Boolean).join(' ');
   if(detail)box.append(node('div',detail));
   const row=node('div',undefined,'button-row');
   actions.forEach(([label,name],n)=>row.append(button(label,n?'secondary':'primary',event=>act(name,r,event.target))));
@@ -279,22 +281,24 @@ function problemCard(r){
   box.append(row);return box;
 }
 function renderFiles(r){
-  const grid=node('div',undefined,'files');
+  const box=node('div',undefined,'files'),images=node('div',undefined,'images'),rows=node('div',undefined,'file-rows');
   for(const f of r.files){
-    const card=node('div',undefined,'file'),url='/ui/api/artifacts/'+encodeURIComponent(f.artifact_id);
+    const url='/ui/api/artifacts/'+encodeURIComponent(f.artifact_id);
     if(f.status==='AVAILABLE'&&IMAGE.has(f.mime_type)){
-      const a=node('a');a.href=url;a.target='_blank';a.rel='noopener';
-      const img=node('img');img.alt=f.filename;img.loading='lazy';img.src=url;a.append(img);card.append(a);
+      const a=node('a',undefined,'image');a.href=url;a.target='_blank';a.rel='noopener';a.title=f.filename;
+      const img=node('img');img.alt=f.filename;img.src=url;a.append(img);images.append(a);continue;
     }
-    const body=node('div',undefined,'file-body');
+    const row=node('div',undefined,'file-row');
     const ext=(f.filename.match(/\.([a-z0-9]{1,6})$/i)?.[1]||f.mime_type?.split('/')[1]||'文件').toUpperCase();
-    body.append(node('div',f.filename,'file-name'),node('div',ext+' · '+size(f.size_bytes),'file-info'));
-    if(f.status==='AVAILABLE'){const a=node('a','下载');a.href=url+'?download=1';body.append(a);}
-    else if(f.status==='EXPIRED')body.append(node('div','已过保留期','file-info'));
-    else body.append(node('div',f.error?.message||'还没取回','error'));
-    card.append(body);grid.append(card);
+    row.append(node('span',ext.slice(0,4),'file-type'),node('span',f.filename,'file-name'),node('span',size(f.size_bytes),'file-info'));
+    if(f.status==='AVAILABLE'){const a=node('a','下载');a.href=url+'?download=1';row.append(a);}
+    else row.append(node('span',f.status==='EXPIRED'?'已过保留期':f.error?.message||'还没取回','file-info error'));
+    rows.append(row);
   }
-  return grid;
+  if(images.childElementCount)box.append(images);
+  if(rows.childElementCount)box.append(rows);
+  if(r.expired)box.append(node('p','部分文件已过保留期，下载已停用。','notice'));
+  return box;
 }
 function renderSources(sources){
   const details=node('details',undefined,'sources');details.append(node('summary','来源 · '+sources.length));
@@ -312,7 +316,7 @@ function renderMeta(r,k){
   const meta=node('div',undefined,'turn-meta');
   if(k==='running'){
     const live=node('span',undefined,'live');
-    live.append((r.answer?(PHASE[r.status]||'生成中')+' · '+(r.progress?.answer_characters||r.answer.length).toLocaleString()+' 字 · ':'')+'已用 ',since(r.created));
+    live.append((r.answer?(r.phase||PHASE[r.status]||'生成中')+' · '+(r.progress?.answer_characters||r.answer.length).toLocaleString()+' 字 · ':'')+'已用 ',since(r.created));
     meta.append(live,button('停止',undefined,event=>act('cancel_query',r,event.target)));
     return meta;
   }
@@ -402,7 +406,7 @@ setInterval(async()=>{
   try{
     if(state.view==='exports'){await loadExports();return;}
     const before=currentQuery()?.updated_at;await loadQueries();
-    const running=state.thread?.rounds.some(r=>kind(r.status)==='running');
+    const running=state.thread?.rounds.some(r=>kindOf(r)==='running');
     if(state.view==='thread'&&(running||currentQuery()?.updated_at!==before)){await refreshThread();}
   }catch(error){if(state.owner)toast(error.message);}finally{polling=false;}
 },4000);

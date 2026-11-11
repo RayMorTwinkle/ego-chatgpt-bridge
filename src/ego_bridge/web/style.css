@@ -136,14 +136,19 @@ button.foot-row:hover{background:var(--hover);color:var(--ink)}
 .problem .secondary{font-size:13px;padding:5px 11px}
 .notice{border-radius:8px;background:var(--amber-soft);color:var(--amber);font-size:13px;padding:8px 12px;margin:10px 0}
 
-.files{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:18px}
-.file{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--paper);min-width:0;display:flex;flex-direction:column}
-.file img{width:100%;height:160px;object-fit:cover;display:block;background:var(--code-bg)}
-.file-body{padding:9px 11px;font-size:13px;display:flex;flex-direction:column;gap:2px}
-.file-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.file-info{font-size:12px;color:var(--faint)}
-.file-body a{font-size:12px;text-decoration:none}
-.file-body .error{font-size:12px}
+.files{margin-top:18px;display:flex;flex-direction:column;gap:10px}
+.images{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.image{display:block;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--code-bg)}
+.image img{width:100%;aspect-ratio:4/3;object-fit:contain;display:block}
+.image:hover{border-color:var(--faint)}
+.file-rows{border:1px solid var(--line);border-radius:10px;background:var(--paper)}
+.file-row{display:flex;align-items:center;gap:12px;padding:9px 12px;font-size:14px}
+.file-row+.file-row{border-top:1px solid var(--line)}
+.file-type{font:600 10.5px/1 var(--mono);color:var(--muted);background:var(--code-bg);border-radius:4px;padding:5px 0;width:40px;text-align:center;flex:none}
+.file-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-info{font-size:12px;color:var(--faint);white-space:nowrap}
+.file-info.error{color:var(--danger);white-space:normal}
+.file-row a{font-size:13px;text-decoration:none}
 .sources{margin-top:16px;font-size:13px}
 .sources summary{cursor:pointer;color:var(--muted);width:fit-content;padding:3px 0}
 .sources summary:hover{color:var(--ink)}
@@ -169,6 +174,7 @@ button.foot-row:hover{background:var(--hover);color:var(--ink)}
 .md li::marker{color:var(--faint)}
 .md .md-task{list-style:none;margin-left:-1.3em}
 .md .md-task::before{content:"☐ ";color:var(--faint)}
+.md .md-task>p:first-of-type{display:inline}
 .md .md-task[data-done="true"]::before{content:"☑ "}
 .md a{text-decoration:underline;text-decoration-color:color-mix(in srgb,var(--accent) 35%,transparent);text-underline-offset:3px}
 .md a:hover{text-decoration-color:var(--accent)}
@@ -254,4 +260,5 @@ pre#diagnose-text{font-family:var(--mono);font-size:12px;background:var(--code-b
   .ask{max-width:94%}
   .md{font-size:15px}
   .thread-actions .quiet-link{padding:6px 5px}
+  #diagnose{display:none}
 }
