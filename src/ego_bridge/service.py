@@ -24,6 +24,14 @@ LONG_RESEARCH_GUIDANCE = (
     "僅在 complete=true 後取得最終交付，並另外驗收內容品質。generation_done 只是可能回退的網頁訊號。"
 )
 
+# prepare cannot send. All other codes require a fix or stronger identity evidence.
+PRE_SEND_RETRY = {
+    'BROWSER_OPERATION_FAILED', 'BROWSER_TIMEOUT', 'EGO_CONNECTION_FAILED', 'EGO_UNAVAILABLE',
+    'PAGE_LOAD_FAILED', 'TAB_MISSING', 'HISTORY_NOT_CONFIRMED',
+    'ATTACHMENT_UPLOAD_FAILED', 'ATTACHMENT_UPLOAD_INCOMPLETE', 'DRAFT_ATTACHMENT_MISMATCH',
+}
+RETRY_DELAYS = (15, 60, 180)
+
 ANSWER_LOAD_ERROR = re.compile(
     r"^(?:無法載入這則回覆|无法加载此回复|无法加载这条回复|"
     r"Unable to load (?:this )?(?:response|message)|Could not load (?:this )?(?:response|message))[。.!]?$",
@@ -89,7 +97,7 @@ class Service:
     def result_cursor(op, artifacts):
         result=op.get('result') or {}
         value={'message_id':op['id'],'status':op['status'],'error':op['error'],
-            'result':{key:result.get(key) for key in ('content','markdown','sources','external_images','completeness_signal','extraction_stable','generation_done','render_error','delivery_phase')},
+            'auto_retry':op.get('auto_retry'),'result':{key:result.get(key) for key in ('content','markdown','sources','external_images','completeness_signal','extraction_stable','generation_done','render_error','delivery_phase')},
             'artifacts':artifacts}
         return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
 
@@ -128,7 +136,8 @@ class Service:
         q = self.store.query(op["owner"], op["query_id"])
         elapsed = now() - (op["submitted_at"] or op["created_at"])
         return dict(query_id=q["id"], message_id=op["id"], request_id=op["request_id"], sequence=op["sequence"], status=op["status"],
-                    conversation_id=q["conversation_id"], conversation_url=q["conversation_url"],
+                    conversation_id=q["conversation_id"], conversation_url=q["conversation_url"], chat_title=q["chat_title"],
+                    auto_retry=op.get("auto_retry") or dict(attempts=0,max=3,next_at=None),
                     project_identifier=q["project_id"], space_identifier=q["space_id"],
                     runtime_space_identifier=self.settings.space_id,
                     requested_model="GPT-6", requested_effort=op["payload"]["effort"],
@@ -255,7 +264,7 @@ class Service:
                     'ok', 'query_id', 'message_id', 'status', 'complete', 'generation_complete',
                     'generation_done', 'extraction_stable', 'delivery_complete', 'delivery_expired',
                     'result_is_partial', 'semantic_validation', 'cursor', 'last_error',
-                    'conversation_id', 'conversation_url', 'observed', 'next_action',
+                    'conversation_id', 'conversation_url', 'chat_title', 'auto_retry', 'observed', 'next_action',
                     'progress', 'soft_timeout_exceeded',
                 }}
             if args.get('include_content',True):
@@ -289,6 +298,7 @@ class Service:
                 self.store.transition(op['id'],'COMPLETED' if result['delivery_complete'] else op['status'],result=result,
                                       error=None if result['delivery_complete'] else BridgeError('ARTIFACT_CAPTURE_FAILED','至少一个产物尚未拿到有效字节。',stage='artifact',action=True).data)
                 if result['delivery_complete']:
+                    self.clear_retry_due(self.store.operation(op['id']))
                     try:
                         closed=await self.adapter.call('close',**self.browser_args(self.store.operation(op['id'])))
                         if closed.get('closed'):self.store.patch(op['id'],page_label=None)
@@ -316,6 +326,7 @@ class Service:
         if tool == "retry_query":
             if op["status"] != "NEEDS_ATTENTION" or op["submitted_at"] is not None:
                 raise BridgeError("UNSAFE_RETRY", "只允许尚未进入发送边界的人工修复任务重试；已发送或结果不确定不能重发。", action=True)
+            self.clear_retry_due(op)
             self.store.transition(op["id"], "QUEUED")
             self.wake.set()
             return {"ok": True, **self.view(self.store.operation(op["id"]))}
@@ -323,6 +334,7 @@ class Service:
             async with self.control:
                 op = self.store.operation(op["id"])
                 if op["status"] == "QUEUED":
+                    self.clear_retry_due(op)
                     self.store.transition(op["id"], "CANCELLED")
                     return {"ok": True, "cancelled": True, "best_effort": False, **self.view(self.store.operation(op["id"]))}
                 if op["status"] in {"WAITING_FOR_RESPONSE", "GENERATING"}:
@@ -346,6 +358,37 @@ class Service:
                     send_text=op["payload"]["text"] + ("\n\n研究范围约束：仅依据本条请求及可核验来源作答；不要把项目记忆或其他对话中的偏好、经历和任务当作本次事实。缺失条件请明确说明，勿自行补充个人背景。" if op["payload"].get("context_mode")=="request_only_best_effort" else "") + f"\n\n[ego-bridge request:{op['id']}]", effort=(op["observed"] or {}).get("effort", op["payload"]["effort"]), baseline=op["baseline"],
                     target_user_message_id=(op['result'] or {}).get('user_message_id'),target_assistant_message_id=(op['result'] or {}).get('assistant_message_id'))
 
+    def schedule_retry(self, op, error, kind):
+        retry=dict(op.get('auto_retry') or {})
+        counters=dict(retry.get('counters') or {})
+        attempts=counters.get(kind,0)
+        maximum=1 if kind=='recover' else 3
+        retry['history']=[*retry.get('history',[]),{'at':now(),'kind':kind,'attempt':attempts,'error':dict(error)}]
+        if attempts>=maximum:
+            self.store.patch(op['id'],auto_retry=retry)
+            return False
+        counters[kind]=attempts+1
+        retry.update(kind=kind,attempts=attempts+1,max=maximum,next_at=now()+RETRY_DELAYS[attempts],counters=counters)
+        self.store.patch(op['id'],auto_retry=retry)
+        return True
+
+    def clear_retry_due(self, op):
+        retry=op.get('auto_retry')
+        if retry and retry.get('next_at') is not None:
+            self.store.patch(op['id'],auto_retry={**retry,'next_at':None})
+
+    async def automatic_recovery(self):
+        for row in self.store.db.execute("SELECT id FROM operations WHERE status='OUTCOME_UNKNOWN'").fetchall():
+            op=self.store.operation(row[0]);retry=op.get('auto_retry') or {}
+            if not retry.get('counters',{}).get('recover'):
+                self.schedule_retry(op,op.get('error') or {},'recover')
+                continue
+            if retry.get('kind')!='recover' or retry.get('next_at') is None or retry['next_at']>now():continue
+            if len(self.store.active())>=self.settings.max_active:continue
+            # Consume before the read-only call, including across process restarts.
+            self.clear_retry_due(op)
+            await self.observe(self.store.operation(op['id']),recover=True)
+
     async def run(self):
         while True:
             try:
@@ -353,9 +396,12 @@ class Service:
                     # Polling only reads known pages. A failed observation never triggers a send.
                     for op in self.store.active():
                         if op["status"] in {"WAITING_FOR_RESPONSE", "GENERATING"}:
-                            await self.observe(op)
+                            if self.retry_due(op):
+                                self.clear_retry_due(op)
+                                await self.observe(self.store.operation(op["id"]))
+                    await self.automatic_recovery()
                     occupied = len(self.store.active())
-                    for op in self.store.candidates()[:max(0, self.settings.max_active - occupied)]:
+                    for op in [o for o in self.store.candidates() if self.retry_due(o)][:max(0, self.settings.max_active - occupied)]:
                         await self.execute(op)
                 self.last_worker_error = None
             except asyncio.CancelledError:
@@ -368,9 +414,16 @@ class Service:
             except TimeoutError:
                 pass
 
+    @staticmethod
+    def retry_due(op):
+        return ((op.get('auto_retry') or {}).get('next_at') or 0)<=now()
+
     async def execute(self, op):
+        op=self.store.operation(op['id'])
+        if op['status']!='QUEUED' or op['submitted_at'] is not None or not self.retry_due(op):return
         op_id = op["id"]
         try:
+            self.clear_retry_due(op)
             self.store.transition(op_id, "PREPARING")
             args = self.browser_args(op)
             if op['kind']=='create':
@@ -416,13 +469,20 @@ class Service:
                 self.store.patch(op_id, page_label=label)
             status = "OUTCOME_UNKNOWN" if current["status"] == "SUBMITTING" else "NEEDS_ATTENTION"
             error.data["safe_to_retry"] = status != "OUTCOME_UNKNOWN"
+            if status!='OUTCOME_UNKNOWN' and current['submitted_at'] is None and error.data['error_code'] in PRE_SEND_RETRY:
+                if self.schedule_retry(current,error.data,'prepare'):
+                    error.data['user_action_required']=False
+                    status='QUEUED'
             self.store.transition(op_id, status, error=error.data)
+            if status=='OUTCOME_UNKNOWN':self.schedule_retry(self.store.operation(op_id),error.data,'recover')
         except Exception as error:
             current = self.store.operation(op_id)
             status = "OUTCOME_UNKNOWN" if current["status"] == "SUBMITTING" else "NEEDS_ATTENTION"
             self.store.transition(op_id, status, error=BridgeError("EXECUTION_ERROR", "执行器内部异常，保留任务现场。", stage=current["status"], action=True, context={"type": type(error).__name__}).data)
 
     async def observe(self, op, recover=False):
+        if not recover and not self.retry_due(op):return
+        self.clear_retry_due(op)
         try:
             if not op["baseline"] or op["submitted_at"] is None:
                 # Preparation failures can retry but must never be treated as sent messages.
@@ -480,12 +540,17 @@ class Service:
             # Legacy temporary routes can be promoted only here, after exact
             # baseline, nonce-bearing user text and turn-count reconciliation.
             self.store.bind_conversation(op["query_id"], url, cid, self.settings.space_id,promote_provisional=True)
+            title=s.get('title')
+            if isinstance(title,str):
+                title=re.sub(r'\s*[-–—|]\s*ChatGPT\s*$','',title).strip()
+                if title and title.casefold() not in {'chatgpt','new chat','新对话','新對話','新聊天'}:
+                    self.store.db.execute('UPDATE queries SET chat_title=? WHERE id=?',(title[:500],op['query_id']))
             turn = new[0]
             state = turn["state"]
             label=s.get("model_label")
             if label is not None:
                 effort=(op["observed"] or {}).get("effort",op["payload"]["effort"])
-                effort_ok=bool(re.search(r"Extra High|極高|极高",label)) if effort=='extra_high' else bool(re.search(r"(^|\s)High($|\s)|推理強度\s*高$",label))
+                effort_ok=bool(re.search(r"Extra High|極高|极高",label)) if effort=='extra_high' else bool(re.search(r"(^|\s)High($|\s)|(?:推理強度|推理强度|思考强度)\s*高$",label))
                 if not effort_ok or re.search(r"5\.6|\bPro\b",label):
                     raise BridgeError("MODEL_SELECTION_CHANGED", "网页当前模型／思考选择发生变化，无法继续确认所请求配置。",stage="observe",action=True)
             self.last_verified_page={'page_label':response['page_label'],'at':now()}
@@ -519,8 +584,11 @@ class Service:
                         result[key]=last_result[key]
             if stable:
                 result=await self.package_result(op,turn,result)
-                self.store.transition(op["id"], "COMPLETED" if result['delivery_complete'] else 'NEEDS_ATTENTION', result=result,
-                                      error=None if result['delivery_complete'] else BridgeError('ARTIFACT_CAPTURE_FAILED','回答已生成，部分产物尚未得到可回传内容；无需重新发送问题。',stage='artifact',action=True).data)
+                error=None if result['delivery_complete'] else BridgeError('ARTIFACT_CAPTURE_FAILED','回答已生成，部分产物尚未得到可回传内容；无需重新发送问题。',stage='artifact',action=True).data
+                retrying=bool(error and not result.get('unsupported_outputs') and self.schedule_retry(self.store.operation(op['id']),error,'artifact'))
+                if retrying:error['user_action_required']=False
+                if result['delivery_complete']:self.clear_retry_due(self.store.operation(op['id']))
+                self.store.transition(op["id"], "COMPLETED" if result['delivery_complete'] else 'GENERATING' if retrying else 'NEEDS_ATTENTION', result=result,error=error)
                 if not result['delivery_complete']:
                     return
                 try:
@@ -546,7 +614,10 @@ class Service:
                 self.store.transition(op["id"], target, result=result, error=cancel_error)
         except BridgeError as error:
             unknown = error.data["error_code"] in {"SEND_OUTCOME_UNKNOWN", "MESSAGE_ASSOCIATION_FAILED", "HISTORY_CHANGED"}
-            self.store.transition(op["id"], "OUTCOME_UNKNOWN" if unknown else "NEEDS_ATTENTION", error=error.data)
+            artifact_retry=(op.get('auto_retry') or {}).get('kind')=='artifact' and error.data['error_code'] in PRE_SEND_RETRY
+            retrying=artifact_retry and self.schedule_retry(self.store.operation(op['id']),error.data,'artifact')
+            self.store.transition(op["id"], "OUTCOME_UNKNOWN" if unknown else "GENERATING" if retrying else "NEEDS_ATTENTION", error=error.data)
+            if unknown:self.schedule_retry(self.store.operation(op['id']),error.data,'recover')
 
     async def package_result(self,op,turn,result):
         result.update(delivery_complete=False,delivery_phase='COLLECTING_ARTIFACTS')

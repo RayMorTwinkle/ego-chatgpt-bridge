@@ -212,3 +212,59 @@ y=2]</p></div>
   const md=readChatPage().turns[0].assistant_markdown;
   assert.equal(md,'## Heading\n\nFirst paragraph.\n\nSecond paragraph.\n\n```python\nx = 1\n\n\nprint(x)\n```\n\n$$\nx=1\n\n\ny=2\n$$\n\nEnd.');
 });
+
+test('reused space ID falls back to the unique exact name without claiming the wrong space',async()=>{
+  const {readFile}=await import('node:fs/promises');
+  const source=await readFile(new URL('../src/ego_bridge/browser.mjs',import.meta.url),'utf8');
+  const fn=source.slice(source.indexOf('async function runtimeSpace()'),source.indexOf('\nasync function state('));
+  const receipt={};const claimed=[];
+  const run=new Function('input','receipt','listTaskSpaces','claimTaskSpace','takeOverTaskSpace','fail',`${fn};return runtimeSpace();`);
+  const task=await run({space_id:2,space_name:'bridge',force_space_takeover:true},receipt,
+    async()=>[{id:2,name:'other',ownership:'user'},{id:9,name:'bridge',ownership:'user'}],
+    async id=>{claimed.push(id);return {spaceId:id,name:'bridge'};},async()=>assert.fail('wrong takeover'),code=>{throw Error(code);});
+  assert.equal(task.spaceId,9);assert.deepEqual(claimed,[9]);assert.equal(receipt.runtime_space.reason,'named_space_id_changed');
+});
+
+for(const [model,copy,regenerate,remove,preview] of [
+  ['選取 ChatGPT 模型','複製','重新產生回覆','移除','開啟 report.csv 預覽'],
+  ['选择 ChatGPT 模型','复制','重新生成回复','删除','打开 report.csv 预览'],
+  ['Select ChatGPT model','Copy','Regenerate response','Remove','Open report.csv preview'],
+])test(`reader handles model, completion, attachment and file labels: ${model}`,()=>{
+  const doc=fixture(user()+body()+`<button aria-label="${regenerate}"></button><button aria-label="${preview}"></button><div class="turn-action-controls"><button aria-label="${copy}"></button><button aria-label="More actions"></button></div>`,'complete');
+  doc.querySelector('form button').setAttribute('aria-label',model);
+  doc.querySelector('form').insertAdjacentHTML('beforeend',`<div data-composer-attachments><button aria-label="${remove} report.csv"></button></div>`);
+  const s=readChatPage();assert.equal(s.model_label,'極高');assert.deepEqual(s.draft_attachments,['report.csv']);
+  assert.equal(s.turns[0].regenerate,true);assert.equal(s.turns[0].final_actions,true);
+  assert.equal(s.turns[0].artifacts[0].name,'report.csv');
+});
+
+test('control locator prioritizes test IDs, handles hidden duplicates and all locale fallbacks',async()=>{
+  const {readFile}=await import('node:fs/promises');
+  const source=await readFile(new URL('../src/ego_bridge/browser.mjs',import.meta.url),'utf8');
+  const definitions=source.slice(source.indexOf('const CONTROLS'),source.indexOf('async function control('));
+  const {CONTROLS,findControl}=new Function(`${definitions};return {CONTROLS,findControl};`)();
+  fixture('');
+  document.querySelector('form').insertAdjacentHTML('beforeend','<button data-testid="model-switcher-dropdown-button">High</button>');
+  let selector=findControl({selectors:CONTROLS.model,kind:'model',mark:true});
+  assert.equal(document.querySelector(selector).getAttribute('data-testid'),'model-switcher-dropdown-button');
+  for(const [kind,labels] of Object.entries({model:['選取 ChatGPT 模型','选择 ChatGPT 模型','Select ChatGPT model'],profile:['開啟個人檔案選單','打开个人资料菜单','Open profile menu'],send:['傳送','发送','Send prompt']})){
+    for(const label of labels){
+      fixture('');document.querySelector('form').innerHTML=`<button aria-label="${label}" hidden></button><button aria-label="${label}">target</button>`;
+      selector=findControl({selectors:CONTROLS[kind],kind,mark:true});
+      assert.ok(selector);assert.equal(document.querySelectorAll(selector).length,1);assert.equal(document.querySelector(selector).textContent,'target');
+    }
+  }
+  fixture('');document.body.insertAdjacentHTML('beforeend','<div role="menuitem">選取模型</div>');
+  assert.ok(findControl({selectors:CONTROLS.modelMenu,kind:'modelMenu',mark:true}));
+});
+
+test('ambiguous names and unconfirmed renames never claim a space',async()=>{
+  const {readFile}=await import('node:fs/promises');
+  const source=await readFile(new URL('../src/ego_bridge/browser.mjs',import.meta.url),'utf8');
+  const fn=source.slice(source.indexOf('async function runtimeSpace()'),source.indexOf('\nasync function state('));
+  const run=new Function('input','receipt','listTaskSpaces','fail',`${fn};return runtimeSpace();`);
+  const input={space_id:2,space_name:'bridge',force_space_takeover:true};
+  for(const [spaces,code] of [ [[{id:2,name:'renamed'}],'SPACE_IDENTITY_MISMATCH'], [[{id:2,name:'bridge'},{id:3,name:'bridge'}],'SPACE_AMBIGUOUS'] ]){
+    await assert.rejects(run(input,{},async()=>spaces,code=>{throw Error(code);}),new RegExp(code));
+  }
+});

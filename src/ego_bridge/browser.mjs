@@ -1,6 +1,37 @@
 // Executed only by `ego-browser nodejs`; this is the installed Ego API, not Playwright.
 // `input` is injected as a JSON value by adapter.py, never through a shell.
-const MODEL_BUTTON = 'loc=css:button[aria-label="選取 ChatGPT 模型"]';
+const CONTROLS = {
+  model:['button[data-testid="model-switcher-dropdown-button"]','button[data-testid="model-selector"]','form button[aria-haspopup="menu"]:has([data-model-name])',
+    'button[aria-label="選取 ChatGPT 模型"]','button[aria-label="选择 ChatGPT 模型"]','button[aria-label="Select ChatGPT model"]','button[aria-label="Choose model"]'],
+  profile:['button[data-testid="accounts-profile-button"]','button[data-testid="profile-button"]',
+    'button[aria-label="開啟個人檔案選單"]','button[aria-label="打开个人资料菜单"]','button[aria-label="Open profile menu"]'],
+  send:['form button[data-testid="send-button"]','form button[type="submit"]',
+    'form button[aria-label="傳送"]','form button[aria-label="发送"]','form button[aria-label="Send prompt"]','form button[aria-label="Send message"]'],
+  modelMenu:['[role="menuitem"]:has([data-testid="model-selector"])','[role="menuitem"][aria-label="選取模型"]',
+    '[role="menuitem"][aria-label="选择模型"]','[role="menuitem"][aria-label="Select model"]','[role="menuitem"]'],
+};
+function findControl({selectors,kind,mark=false}) {
+  for(const selector of selectors){
+    const matches=Array.from(document.querySelectorAll(selector)).filter(e=>
+      e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden'&&
+      (selector!=='[role="menuitem"]'||/^(選取模型|选择模型|Select model)$/i.test((e.getAttribute('aria-label')||e.innerText||'').trim())));
+    if(matches.length!==1)continue;
+    // Return a unique locator even when a hidden duplicate shares the selector.
+    if(mark){
+      for(const e of document.querySelectorAll(`[data-ego-control="${kind}"]`))e.removeAttribute('data-ego-control');
+      matches[0].setAttribute('data-ego-control',kind);
+    }
+    return `[data-ego-control="${kind}"]`;
+  }
+  return null;
+}
+async function control(page, kind) {
+  const args={selectors:CONTROLS[kind],kind};
+  await page.waitForFunction(findControl,args,{timeout:20000});
+  const selector=await page.evaluate(findControl,{...args,mark:true});
+  if(!selector)fail('UI_CHANGED',`找不到可唯一定位的 ${kind} 控件。`,input.action);
+  return 'loc=css:'+selector;
+}
 const EDITOR = 'loc=css:form [contenteditable="true"]';
 const FILE_INPUT = 'loc=css:form input[type=file][multiple]:is(:not([accept]),[accept=""])';
 const norm = s => String(s ?? '').replace(/\s+/g, ' ').trim();
@@ -27,19 +58,20 @@ async function usable(page) {
 
 async function runtimeSpace() {
   const spaces=await listTaskSpaces();
-  let entry=spaces.find(s=>s.id===input.space_id);
-  if(!entry){
-    const named=spaces.filter(s=>s.name===input.space_name);
-    if(named.length>1)fail('SPACE_AMBIGUOUS','专用空间名称不唯一，不能猜测目标空间。');
-    entry=named[0];
-  }
+  const named=spaces.filter(s=>s.name===input.space_name);
+  if(named.length>1)fail('SPACE_AMBIGUOUS','专用空间名称不唯一，不能猜测目标空间。');
+  const persisted=spaces.find(s=>s.id===input.space_id);
+  receipt.space_identity={configured_id:input.space_id,configured_name:input.space_name,
+    persisted_id_name:persisted?.name??null,named_ids:named.map(s=>s.id)};
+  // Ego IDs are instance-local. A reused ID must never override the exact name.
+  let entry=named[0];
+  if(!entry&&persisted)fail('SPACE_IDENTITY_MISMATCH','旧空间编号指向不同名称，且找不到配置名称；不能推断是重命名还是编号复用。');
   if(!entry){
     if(!input.recreate_missing_space)fail('SPACE_MISSING','专用空间不存在，自动重建未开启。');
     const created=await taskSpace(input.space_name);
     receipt.runtime_space={previous_id:input.space_id,space_id:created.spaceId,name:created.name,recreated:true,history_restored:false};
     return created;
   }
-  if(entry.name!==input.space_name) fail('SPACE_IDENTITY_MISMATCH','空间名称和持久化标识不一致。');
   let task;
   if(input.force_space_takeover){
     task=entry.ownership==='user'||entry.ownership==='inactive'?await claimTaskSpace(entry.id):await takeOverTaskSpace(entry.id);
@@ -47,7 +79,8 @@ async function runtimeSpace() {
     if(entry.ownership==='user')fail('SPACE_USER_CONTROL','专用空间当前由用户控制。');
     task=await taskSpace(entry.id);
   }
-  receipt.runtime_space={previous_id:input.space_id,space_id:task.spaceId,name:task.name,recreated:false,exclusive:!!input.force_space_takeover};
+  if(task.name!==input.space_name)fail('SPACE_IDENTITY_MISMATCH','接管回执的空间名称与配置不一致，停止操作。');
+  receipt.runtime_space={previous_id:input.space_id,space_id:task.spaceId,name:task.name,recreated:false,exclusive:!!input.force_space_takeover,reason:entry.id!==input.space_id?'named_space_id_changed':'existing_binding'};
   return task;
 }
 
@@ -61,7 +94,7 @@ function checkAttachments(s, names, stage) {
   const same=JSON.stringify([...s.draft_attachments].sort())===JSON.stringify([...names].sort());
   if(!same||s.draft_uploading) fail('DRAFT_ATTACHMENT_MISMATCH','草稿附件与本轮请求不一致或尚未完成上传；未发送。',stage);
   if(names.length && (s.alerts.some(text=>/上[傳传]失[敗败]|upload failed|failed to upload/i.test(text)) ||
-      !s.buttons.some(b=>b.label==='傳送'&&!b.disabled)))
+      !s.buttons.some(b=>/^(傳送|发送|Send prompt|Send message)$/.test(b.label??'')&&!b.disabled)))
     fail('ATTACHMENT_UPLOAD_INCOMPLETE','网页未确认附件可发送；未发送。',stage);
 }
 
@@ -71,7 +104,7 @@ async function uploadAttachments(page, paths, names) {
     await page.waitForFunction(files=>{
       const group=document.querySelector('form [data-composer-attachments]');
       const labels=Array.from(group?.querySelectorAll('button[aria-label]')??[],b=>b.getAttribute('aria-label'));
-      return files.every(name=>labels.includes('移除 '+name)||labels.includes('Remove '+name)) &&
+      return files.every(name=>labels.includes('移除 '+name)||labels.includes('删除 '+name)||labels.includes('Remove '+name)) &&
         !group?.querySelector('[role="progressbar"]');
     },names,{timeout:90000});
   } catch(error) {
@@ -122,8 +155,8 @@ async function freshPage(task){
 }
 
 async function account(page) {
-  await page.click('loc=css:button[aria-label="開啟個人檔案選單"]');
-  await page.waitForFunction(()=>Array.from(document.querySelectorAll('[role="menu"]')).some(e=>/登出/.test(e.innerText)),undefined,{timeout:8000});
+  await page.click(await control(page,'profile'));
+  await page.waitForFunction(()=>Array.from(document.querySelectorAll('[role="menu"]')).some(e=>/登出|退出登录|Log out|Sign out/i.test(e.innerText)),undefined,{timeout:8000});
   const confirmed=await page.evaluate(expected=>Array.from(document.querySelectorAll('[role="menu"]')).some(e=>e.innerText.split('\n')[0].trim()===expected),input.expected_account);
   await page.keyboard.press('Escape');
   if(!confirmed) fail('ACCOUNT_MISMATCH','当前账户显示名称与配置不符。','account');
@@ -132,14 +165,17 @@ async function account(page) {
 
 async function modelInfo(page) {
   await page.keyboard.press('Escape');
-  await page.waitForSelector(MODEL_BUTTON,{state:'visible',timeout:20000});
-  await page.click(MODEL_BUTTON);
-  return await page.evaluate(()=>({
+  const button=await control(page,'model');
+  await page.waitForSelector(button,{state:'visible',timeout:20000});
+  await page.click(button);
+  return await page.evaluate(selectors=>({
     models:Array.from(document.querySelectorAll('[role="menuitemradio"]')).map(e=>({label:e.textContent?.trim(),checked:e.getAttribute('aria-checked')==='true'})),
     effort_value:Number(document.querySelector('[role="slider"]')?.getAttribute('aria-valuenow')),
-    label:document.querySelector('button[aria-label="選取 ChatGPT 模型"]')?.innerText,
-    disabled:document.querySelector('[aria-label="效能"]')?.getAttribute('aria-disabled')==='true'
-  }));
+    label:selectors.map(selector=>Array.from(document.querySelectorAll(selector)).filter(e=>e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden'))
+      .find(matches=>matches.length===1)?.[0]?.innerText,
+    disabled:document.querySelector('[role="slider"]')?.getAttribute('aria-disabled')==='true'||
+      document.querySelector('[aria-label="效能"],[aria-label="性能"],[aria-label="Performance"]')?.getAttribute('aria-disabled')==='true'
+  }),CONTROLS.model);
 }
 
 async function capture(page) {
@@ -167,12 +203,12 @@ async function capture(page) {
     const turn=Array.from(document.querySelectorAll('[data-talvt-turn-state]')).find(t=>t.querySelector('[data-chatgpt-search-message-ids]')?.getAttribute('data-chatgpt-search-message-ids')===userId);
     if(!turn)return false;
     const user=turn.querySelector('[data-chatgpt-search-message-ids]');
-    const previews=Array.from(turn.querySelectorAll('button[aria-label^="開啟 "][aria-label$=" 預覽"]')).filter(e=>!user?.contains(e)&&e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden');
+    const previews=Array.from(turn.querySelectorAll('button:is([aria-label^="開啟 "][aria-label$=" 預覽"],[aria-label^="打开 "][aria-label$=" 预览"],[aria-label^="Open "][aria-label$=" preview"])')).filter(e=>!user?.contains(e)&&e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden');
     const preview=previews[candidate.index];
-    if(!preview||preview.getAttribute('aria-label')!==`開啟 ${candidate.name} 預覽`)return false;
+    if(!preview||!['開啟 '+candidate.name+' 預覽','打开 '+candidate.name+' 预览','Open '+candidate.name+' preview'].includes(preview.getAttribute('aria-label')))return false;
     let card=preview.parentElement;
     while(card&&card!==turn){
-      const downloads=card.querySelectorAll('button[aria-label="下載檔案"]');
+      const downloads=card.querySelectorAll('button:is([data-testid="download-file"],[aria-label="下載檔案"],[aria-label="下载文件"],[aria-label="Download file"])');
       if(downloads.length===1){preview.setAttribute('data-ego-preview',token);downloads[0].setAttribute('data-ego-download',token);return true;}
       if(downloads.length>1)return false;
       card=card.parentElement;
@@ -239,13 +275,13 @@ async function configure(page, change=true) {
   let info=await modelInfo(page);
   if(!info.models.some(m=>m.label==='GPT-6'&&m.checked)) {
     if(!change || !info.models.some(m=>m.label==='GPT-6')) fail('MODEL_UNAVAILABLE','默认 GPT-6 不可验证。','model');
-    await page.click('loc=role:menuitem[name="選取模型"]');
+    await page.click(await control(page,'modelMenu'));
     await page.click('text="GPT-6"');
     info=await modelInfo(page);
   }
   let target=input.effort==='high'?2:3;
   let fallback=false;
-  const selectedHigh=()=>info.effort_value===2&&/(^|\s)High($|\s)|推理強度\s*高$/.test(info.label);
+  const selectedHigh=()=>info.effort_value===2&&/(^|\s)High($|\s)|(?:推理強度|推理强度|思考强度)\s*高$/.test(info.label);
   if(change&&target===3&&info.disabled&&selectedHigh()) {target=2;fallback=true;}
   if(info.effort_value!==target) {
     if(!change || info.disabled || ![2,3].includes(info.effort_value)) fail('EFFORT_UNAVAILABLE','无法在高／极高之间安全设置。','model');
@@ -253,7 +289,7 @@ async function configure(page, change=true) {
     info=await modelInfo(page);
     if(change&&target===3&&selectedHigh()) {target=2;fallback=true;}
   }
-  const labelOk=target===3?/Extra High|極高|极高/.test(info.label):/(^|\s)High($|\s)|推理強度\s*高$/.test(info.label);
+  const labelOk=target===3?/Extra High|極高|极高/.test(info.label):/(^|\s)High($|\s)|(?:推理強度|推理强度|思考强度)\s*高$/.test(info.label);
   if(!info.models.some(m=>m.label==='GPT-6'&&m.checked)||info.effort_value!==target||!labelOk)
     fail('MODEL_MISMATCH','页面读回的 GPT-6／思考等级与请求不一致。','model');
   await page.keyboard.press('Escape');
@@ -347,10 +383,9 @@ async function main() {
         fail('DRAFT_ATTACHMENTS_PRESENT','输入框已有附件。请核对并清理草稿后重试。','prepare');
       // Only this operation's nonce-bearing, unsent draft can be replaced.
       for(const name of s.draft_attachments){
-        const label=JSON.stringify('移除 '+name);
-        const button=`button[aria-label=${label}]`;
-        await page.hover(`loc=css:form [data-composer-attachments] *:has(> ${button})`,{label:'Show pending attachment controls'});
-        await page.click('loc=css:form '+button,{label:'Replace this operation attachment'});
+        const button=['移除 ','删除 ','Remove '].map(prefix=>`button[aria-label=${JSON.stringify(prefix+name)}]`).join(',');
+        await page.hover(`loc=css:form [data-composer-attachments] *:has(> :is(${button}))`,{label:'Show pending attachment controls'});
+        await page.click('loc=css:form :is('+button+')',{label:'Replace this operation attachment'});
       }
       s=await state(page);
       if(s.draft_attachments.length||s.draft_uploading)fail('DRAFT_ATTACHMENTS_PRESENT','旧附件尚未移除，未发送。','prepare');
@@ -401,8 +436,9 @@ async function main() {
     if(before.draft_has_autolinks)fail('DRAFT_SERIALIZATION_UNSAFE','模型核验后出现自动富链接；未发送。','submit_precondition');
     if(norm(before.draft)!==norm(input.send_text)) fail('DRAFT_MISMATCH','模型验证后草稿发生变化。','submit_precondition');
     checkAttachments(before,input.attachment_names??[],'submit_precondition');
+    const send=await control(page,'send');
     receipt.click_attempted=true;
-    await page.click('loc=css:button[aria-label="傳送"]');
+    await page.click(send);
     receipt.clicked=true;
     // Do not wait for generation. Return the receipt, then reconcile in a separate call.
     return {...receipt,observed:m,state:await state(page)};

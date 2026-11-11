@@ -122,7 +122,8 @@ async def test_image_only_answer_and_download_retry_never_resend_prompt(tmp_path
     await service.observe(store.operation(op['id']))
     r=await service.dispatch('alice','get_query_result',{'query_id':task['query_id']})
     assert r['generation_complete'] and not r['delivery_complete'] and not r['complete']
-    assert r['status']=='NEEDS_ATTENTION' and r['result']['artifacts'][0]['error']['error_code']=='ARTIFACT_EMPTY'
+    assert r['status']=='GENERATING' and r['auto_retry']['attempts']==1
+    assert r['result']['artifacts'][0]['error']['error_code']=='ARTIFACT_EMPTY'
     browser.data=PNG
     await service.dispatch('alice','recover_session',{'query_id':task['query_id']})
     r=await service.dispatch('alice','get_query_result',{'query_id':task['query_id']})
@@ -174,4 +175,40 @@ async def test_external_web_images_do_not_block_real_file_delivery_or_get_fake_b
     assert result['external_images']==references
     assert any(o['type']=='link' and o.get('delivery')=='reference_only' for o in result['outputs'])==reference_present
     assert not browser.sent
+    store.close()
+
+
+async def test_automatic_artifact_retries_back_off_and_stop_after_three(tmp_path,monkeypatch):
+    clock=[1000.0];monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
+    settings=Settings(tmp_path,completion_confirm_seconds=0);store=Store(tmp_path)
+    browser=FileBrowser(data=b'');service=Service(settings,store,browser)
+    task=await service.dispatch('alice','create_query',{'text':'Create file','request_id':'file'})
+    mid=task['message_id'];await service.execute(store.operation(mid))
+    browser.pages['p1'][0]['artifacts']=[{'kind':'file_card','index':0,'name':'test.png'}]
+    for attempt,delay in enumerate((15,60,180),1):
+        await service.observe(store.operation(mid))
+        op=store.operation(mid)
+        assert op['status']=='GENERATING' and op['auto_retry']['attempts']==attempt
+        assert op['auto_retry']['next_at']==clock[0]+delay
+        await service.observe(op)
+        assert store.operation(mid)['auto_retry']['attempts']==attempt
+        clock[0]+=delay
+    await service.observe(store.operation(mid))
+    assert store.operation(mid)['status']=='NEEDS_ATTENTION'
+    assert len(store.operation(mid)['auto_retry']['history'])==4 and len(browser.sent)==1
+    store.close()
+
+
+async def test_automatic_artifact_retry_can_finish_without_operator(tmp_path,monkeypatch):
+    clock=[1000.0];monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
+    settings=Settings(tmp_path,completion_confirm_seconds=0);store=Store(tmp_path)
+    browser=FileBrowser(data=b'');service=Service(settings,store,browser)
+    task=await service.dispatch('alice','create_query',{'text':'Create file','request_id':'file'})
+    mid=task['message_id'];await service.execute(store.operation(mid))
+    browser.pages['p1'][0]['artifacts']=[{'kind':'file_card','index':0,'name':'test.png'}]
+    await service.observe(store.operation(mid))
+    browser.data=PNG;clock[0]+=15
+    await service.observe(store.operation(mid))
+    assert store.operation(mid)['status']=='COMPLETED' and len(browser.sent)==1
+    assert store.operation(mid)['auto_retry']['next_at'] is None
     store.close()

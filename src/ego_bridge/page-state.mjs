@@ -139,12 +139,12 @@ export function readChatPage() {
       widget=>visible(widget)&&!widgetCodeSource(widget)&&!visible(widget.querySelector(readyMermaid))
     ));
     const final_actions=Array.from(turn.querySelectorAll('.turn-action-controls')).some(row=>visible(row)&&
-      visible(row.querySelector('button[aria-label="複製"],button[aria-label="Copy"]'))&&
+      visible(row.querySelector('button[aria-label="複製"],button[aria-label="复制"],button[aria-label="Copy"]'))&&
       visible(row.querySelector('button[aria-label="更多操作"],button[aria-label="More actions"]')));
     const selected=responses.map(e=>e.closest('[data-chatgpt-selection-message-id]')||e.querySelector('[data-chatgpt-selection-message-id]')).find(Boolean)||
       Array.from(turn.querySelectorAll('[data-chatgpt-selection-message-id]')).find(e=>!user?.contains(e)&&visible(e)&&!e.closest('[data-markdown-text-tone="tertiary"]'));
-    const files=Array.from(turn.querySelectorAll('button[aria-label^="開啟 "][aria-label$=" 預覽"]')).filter(e=>!user?.contains(e)&&visible(e));
-    const artifacts=files.map((e,index)=>({kind:'file_card',index,name:e.getAttribute('aria-label').slice(3,-3)}));
+    const files=Array.from(turn.querySelectorAll('button:is([aria-label^="開啟 "][aria-label$=" 預覽"],[aria-label^="打开 "][aria-label$=" 预览"],[aria-label^="Open "][aria-label$=" preview"])')).filter(e=>!user?.contains(e)&&visible(e));
+    const artifacts=files.map((e,index)=>({kind:'file_card',index,name:e.getAttribute('aria-label').replace(/^(?:開啟|打开|Open) /,'').replace(/ (?:預覽|预览|preview)$/,'')}));
     const images=Array.from(turn.querySelectorAll('img')).filter(e=>!user?.contains(e)&&visible(e)&&!e.closest('[data-markdown-text-tone="tertiary"]')&&e.getBoundingClientRect().width>32&&e.getBoundingClientRect().height>32);
     const external_images=[],native_images=[];let progress_images_ignored=0;
     for(const [index,image] of images.entries()){
@@ -172,16 +172,18 @@ export function readChatPage() {
     return {assistant_markdown:render_error?'':joinMarkdown(responses.flatMap((response,index)=>index?['\n\n',markdown(response)]:[markdown(response)])).trim(),extraction,generation_active,render_error,state:turn.getAttribute('data-talvt-turn-state'),user_id:user?.getAttribute('data-chatgpt-search-message-ids')??null,
       user_text:text(userContent),user_source_text:text(userSource),assistant_id:selected?.getAttribute('data-chatgpt-selection-message-id')??null,
       assistant_text:answer,sources,external_images,render_ready:!render_error&&!pendingCode&&!!(answer||native_images.some(i=>i.complete&&i.naturalWidth>0)||external_images.length||unsupported_outputs.length)&&native_images.every(i=>i.complete&&i.naturalWidth>0),
-      artifacts,unsupported_outputs,final_actions,regenerate:!!turn.querySelector('button[aria-label="重新產生回覆"]'),
+      artifacts,unsupported_outputs,final_actions,regenerate:!!turn.querySelector('button:is([aria-label="重新產生回覆"],[aria-label="重新生成回复"],[aria-label="Regenerate response"])'),
       reader_diagnostics:{version:4,pending_code:pendingCode,progress_images_ignored,answer_roots:responses.length,reasoning_nodes_excluded:all.filter(e=>e.closest('[data-markdown-text-tone="tertiary"]')).length,user_controls_excluded:user?.querySelectorAll(ignored).length??0}};
   });
   const editor=document.querySelector('form [contenteditable="true"]');
   const attachmentGroup=editor?.closest('form')?.querySelector('[data-composer-attachments]');
   const draft_attachments=Array.from(attachmentGroup?.querySelectorAll('button[aria-label]')??[])
-    .map(button=>button.getAttribute('aria-label').match(/^(?:移除|Remove) (.+)$/)?.[1]).filter(Boolean);
+    .map(button=>button.getAttribute('aria-label').match(/^(?:移除|删除|Remove) (.+)$/)?.[1]).filter(Boolean);
   return {url:location.href,title:document.title,turns,editor_present:visible(editor),draft:text(editor),draft_has_autolinks:!!editor?.querySelector('[data-rich-text-generated-autolink]'),
     draft_attachments,draft_uploading:!!attachmentGroup?.querySelector('[role="progressbar"]'),
-    model_label:document.querySelector('button[aria-label="選取 ChatGPT 模型"]')?.innerText,
+    model_label:['button[data-testid="model-switcher-dropdown-button"]','button[data-testid="model-selector"]','form button[aria-haspopup="menu"]:has([data-model-name])',
+      'button[aria-label="選取 ChatGPT 模型"]','button[aria-label="选择 ChatGPT 模型"]','button[aria-label="Select ChatGPT model"]','button[aria-label="Choose model"]']
+      .map(selector=>Array.from(document.querySelectorAll(selector)).filter(visible)).find(matches=>matches.length===1)?.[0]?.innerText,
     buttons:Array.from(document.querySelectorAll('form button')).filter(visible).map(b=>({label:b.getAttribute('aria-label'),disabled:b.disabled})),
     dialogs:Array.from(document.querySelectorAll('[role="dialog"],[role="alertdialog"]')).filter(e=>visible(e)&&!(
       e.matches('[role="dialog"][data-slot="popover-content"]:not([aria-modal="true"])')&&

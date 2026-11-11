@@ -50,6 +50,9 @@ class Store:
             filename TEXT NOT NULL, content BLOB NOT NULL, PRIMARY KEY(operation_id,filename));
           CREATE INDEX IF NOT EXISTS operation_status ON operations(status,created_at);
         """)
+        for table, column in (("queries", "chat_title"), ("operations", "auto_retry")):
+            if column not in {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
         os.chmod(directory / "bridge.sqlite3", 0o600)
 
     @contextmanager
@@ -78,7 +81,7 @@ class Store:
         if not row:
             raise BridgeError("OPERATION_NOT_FOUND", "找不到消息操作。")
         result = dict(row)
-        for key in ("payload", "baseline", "observed", "result", "error"):
+        for key in ("payload", "baseline", "observed", "result", "error", "auto_retry"):
             result[key] = json.loads(result[key]) if result[key] else None
         return result
 
@@ -114,7 +117,7 @@ class Store:
             else:
                 query_id = identifier("q")
                 sequence = 1
-                self.db.execute("INSERT INTO queries VALUES(?,?,?,?,?,?,?,?)", (query_id, owner, None, None, project_id, space_id, t, t))
+                self.db.execute("INSERT INTO queries(id,owner,conversation_url,conversation_id,project_id,space_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (query_id, owner, None, None, project_id, space_id, t, t))
             op_id = identifier("msg")
             self.db.execute("""INSERT INTO operations(id,query_id,owner,request_id,kind,fingerprint,sequence,status,payload,created_at,updated_at)
                                VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (op_id, query_id, owner, request_id, kind, fingerprint, sequence, "QUEUED", json.dumps(payload, ensure_ascii=False), t, t))
@@ -140,10 +143,10 @@ class Store:
             self.db.execute("UPDATE queries SET updated_at=? WHERE id=?", (t, op["query_id"]))
 
     def patch(self, op_id: str, **fields):
-        allowed = {"page_label", "baseline", "observed", "submitted_at"}
+        allowed = {"page_label", "baseline", "observed", "submitted_at", "auto_retry"}
         if not fields.keys() <= allowed:
             raise ValueError("Unsupported operation fields")
-        for key in {"baseline", "observed"} & fields.keys():
+        for key in {"baseline", "observed", "auto_retry"} & fields.keys():
             fields[key] = json.dumps(fields[key], ensure_ascii=False)
         fields["updated_at"] = now()
         self.db.execute(f"UPDATE operations SET {','.join(k+'=?' for k in fields)} WHERE id=?", (*fields.values(), op_id))
