@@ -49,6 +49,8 @@ class Service:
     def __init__(self, settings: Settings, store: Store, adapter):
         self.settings, self.store, self.adapter = settings, store, adapter
         self.artifacts = Artifacts(settings, store)
+        from .agent_view import AgentView
+        self.agent_view = AgentView(self)
         self.worker = None
         self.wake = asyncio.Event()
         self.control = asyncio.Lock()
@@ -72,6 +74,7 @@ class Service:
             self.worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self.worker
+        await self.agent_view.stop()
         if hasattr(self.adapter, "close"):
             self.adapter.close()
 
@@ -141,10 +144,15 @@ class Service:
                         'source_count':len((op.get('result') or {}).get('sources',[])),
                         'last_observed_at':(op.get('result') or {}).get('observed_at'),'browser_turn_state':(op.get('result') or {}).get('browser_turn_state'),'partial':op['status'] in {'WAITING_FOR_RESPONSE','GENERATING'}})
 
-    async def dispatch(self, owner: str, tool: str, args: dict) -> dict:
+    async def dispatch(self, owner: str, tool: str, args: dict, *, progress=None) -> dict:
+        from .agent_view import TOOLS
         try:
+            if tool in TOOLS:
+                return await self.agent_view.dispatch(owner,tool,args,progress)
             return await self._dispatch(owner, tool, args)
         except BridgeError as e:
+            if tool in TOOLS:
+                return {"ok":False,"status":"failed","problem":{"code":e.data["error_code"],"message":e.data["message"],"what_to_do":"请检查参数后重试，服务端未自动重试本次调用。"}}
             e.data.update(query_id=args.get("query_id"), request_id=args.get("request_id"))
             result={"ok": False, "error": e.data,"execution_context":self.execution_context()}
             if tool=='health_check':
@@ -157,11 +165,15 @@ class Service:
                     guidance='健康检查是可选诊断，不是请求准入门槛；发送前会独立核验。不要高频重试健康检查，也不要重发已有请求。')
             return result
         except (TypeError, ValueError, KeyError) as e:
+            if tool in TOOLS:
+                return {"ok":False,"status":"failed","problem":{"code":"INVALID_ARGUMENT","message":"参数格式不正确。","what_to_do":"请检查参数后重试，服务端未自动重试本次调用。"}}
             return {"ok": False, "error": BridgeError("INVALID_ARGUMENT", "参数格式不正确。", context={"type": type(e).__name__}).data}
 
     async def _dispatch(self, owner: str, tool: str, args: dict) -> dict:
         if tool == 'wait_query':
             return await self.wait_query(owner,args)
+        if tool == 'read_artifact':
+            return {'ok':True,'artifact':self.artifacts.public(self.artifacts.get(owner,args.get('artifact_id')))}
         if tool == 'get_artifact':
             return {'ok':True,'artifact':self.artifacts.public(self.artifacts.get(owner,args.get('artifact_id')))}
         if tool in {"create_query", "continue_query"}:
@@ -362,6 +374,7 @@ class Service:
                 raise
             except Exception as error:
                 self.last_worker_error = {"error_code": "WORKER_FAILED", "type": type(error).__name__}
+            self.agent_view.tick()
             self.wake.clear()
             try:
                 await asyncio.wait_for(self.wake.wait(), self.settings.poll_seconds)

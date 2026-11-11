@@ -82,7 +82,7 @@ async def test_pkce_code_replay_refresh_rotation_revocation_and_restart(oauth,tm
                     await session.initialize()
                     tools=await session.list_tools()
                     assert tools.tools[0].meta['securitySchemes']
-                    result=await session.call_tool('list_queries',{})
+                    result=await session.call_tool('list',{})
                     assert result.structuredContent['queries']==[]
         db=app.state.oauth.db
         assert tokens['access_token'] not in '\n'.join(row[0] for row in db.execute('select value from oauth_objects'))

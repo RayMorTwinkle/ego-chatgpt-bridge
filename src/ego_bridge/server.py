@@ -22,37 +22,29 @@ from starlette.routing import Mount, Route
 
 from .adapter import EgoAdapter
 from .model import Settings, BridgeError, now
-from .service import LONG_RESEARCH_GUIDANCE, Service
+from .service import Service
 from .store import Store
 from .auth import load_clients
 from .oauth import PUBLIC_PATHS
 from .uploads import MAX_FILES, MAX_REQUEST_BYTES
+from .agent_mcp import INSTRUCTIONS, register, envelope
 
 
-SUBMISSION_TOOLS = {"create_query", "continue_query"}
+SUBMISSION_TOOLS = {"ask", "create_query", "continue_query"}
 ATTACHMENT_ROUTES = {"/mcp"} | {prefix + tool for prefix in ("/api/", "/ui/api/tool/") for tool in SUBMISSION_TOOLS}
 submission_log = logging.getLogger("ego_bridge.submission")
 
-SoftTimeout = Annotated[float, Field(description=(
-    "秒，預設 600。提交前從入列起算，進入提交後從提交時間起算。"
-    "超過時回傳 soft_timeout_exceeded=true，任務繼續執行。"
-))]
-HardTimeout = Annotated[float, Field(description=(
-    "秒，預設 3600，從進入提交時計算。觀察到逾時且尚未完成時，橋接器停止自動觀察並標記 NEEDS_ATTENTION。"
-    "網頁可能仍在生成，請使用原 ID 呼叫 recover_session 對帳，再用 get_query_result 取回結果。"
-))]
-WaitTimeout = Annotated[float, Field(description=(
-    "本次等待的秒數，範圍 0–30，預設 25。0 會立即取快照。"
-    "timed_out=true 只表示本次等候未見新變化，任務會繼續，請用原 ID 和 cursor 再等。"
-))]
+SoftTimeout = Annotated[float, Field(description="提醒等待过久的秒数，默认 600，任务继续执行。")]
+HardTimeout = Annotated[float, Field(description="自动观察的最长秒数，默认 3600。")]
+WaitTimeout = Annotated[float, Field(description="等待秒数，0..30，默认 25。")]
 
 
 class Attachment(BaseModel):
-    filename: Annotated[str, Field(description='原始檔名，僅檔名。')]
-    content_base64: Annotated[str, Field(description='原始檔案位元組的標準 Base64 編碼。')]
+    filename: Annotated[str, Field(description='原始文件名。')]
+    content_base64: Annotated[str, Field(description='原文件字节的 Base64 编码。')]
 
 
-Attachments = Annotated[list[Attachment], Field(max_length=MAX_FILES, description='本輪附件。原始大小合計最多 40 MiB。')]
+Attachments = Annotated[list[Attachment], Field(max_length=MAX_FILES, description='本轮附件，合计最多 40 MiB。')]
 
 
 class TokenAuth:
@@ -177,46 +169,36 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
             return tools
     mcp = BridgeMCP(
         "Ego ChatGPT Bridge",
-        instructions=(
-            LONG_RESEARCH_GUIDANCE
-            + "在橋接服務端的 Ego Browser 固定專案執行 GPT-6 研究。"
-            "get_query_result 回傳累計快照，應替換舊快照。result_is_partial=true 表示中間結果。"
-            "專案指令及記憶可能參與。health_check 是選用診斷。"
-            "OUTCOME_UNKNOWN 請用 recover_session 或 diagnose，避免重送。"
-            "空間 ID 屬於服務端瀏覽器。透過 read_artifact 或 resources/read 取回產物。"
-        ),
+        instructions=INSTRUCTIONS,
         stateless_http=True,
-        json_response=True,
+        json_response=False,
         max_request_body_size=MAX_REQUEST_BYTES,
         transport_security=security,
     )
     mcp._mcp_server.version = version("ego-chatgpt-bridge")
 
-    async def dispatch_http(request: Request, name: str, args: dict):
+    async def dispatch_http(request: Request, name: str, args: dict, *, progress=None):
         # Use request state, not a global user/session variable: sessions must not leak ownership.
         owner = request.state.owner
         received = getattr(request.state, "submission_trace", None)
         if received is None:
-            return await service.dispatch(owner, name, args)
+            return await service.dispatch(owner, name, args, progress=progress)
 
         trace = {**received, "dispatch_started_at": now()}
-        result = await service.dispatch(owner, name, args)
+        result = await service.dispatch(owner, name, args, progress=progress)
         trace["response_ready_at"] = now()
-        if result.get("accepted"):
-            trace["operation_created_at"] = result["created_at"]
+        if result.get("accepted") or name == "ask" and result.get("query_id"):
+            trace["operation_created_at"] = result.get("created_at", store.operation(result["message_id"])["created_at"])
             outcome = {**trace, "query_id": result["query_id"], "message_id": result["message_id"]}
         else:
-            outcome = {**trace, "error_code": (result.get("error") or {}).get("error_code")}
+            outcome = {**trace, "error_code": (result.get("error") or {}).get("error_code") or (result.get("problem") or {}).get("code")}
         submission_log.info("submission_result %s", json.dumps(outcome))
-        return {**result, "submission_trace": trace}
+        return result if name == "ask" else {**result, "submission_trace": trace}
 
     async def call(ctx: Context, name: str, args: dict):
         return await dispatch_http(ctx.request_context.request, name, args)
 
-    @mcp.tool(description=LONG_RESEARCH_GUIDANCE + (
-        "在固定專案新建非同步查詢。request_id 是呼叫方的冪等鍵。"
-        "支援 GPT-6 的 extra_high 與 high。context_mode=request_only_best_effort 可附加範圍約束。可用 attachments 附加檔案。"
-    ))
+    @mcp.tool(description="新建研究，需提供 request_id；推荐使用 ask。")
     async def create_query(text: str, request_id: str, ctx: Context, effort: str = "extra_high", model: str = "GPT-6", soft_timeout: SoftTimeout = 600, hard_timeout: HardTimeout = 3600, context_mode: str = "project", attachments: Attachments | None = None) -> dict[str, Any]:
         return await call(ctx, "create_query", dict(text=text, request_id=request_id, effort=effort, model=model, soft_timeout=soft_timeout, hard_timeout=hard_timeout, context_mode=context_mode, attachments=[file.model_dump() for file in attachments or []]))
 
@@ -233,7 +215,7 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
     def result_envelope(value):
         # Structured consumers get one full payload. Text-only consumers receive
         # the full payload too; use include_content=False / wait_query to keep it small.
-        return types.CallToolResult(content=[types.TextContent(type='text',text=json.dumps(value,ensure_ascii=False))],
+        return types.CallToolResult(content=[types.TextContent(type='text',text=json.dumps(value,ensure_ascii=False,separators=(',',':')))],
             structuredContent=value,isError=not value.get('ok',False))
 
     @mcp.tool(structured_output=False)
@@ -261,10 +243,10 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
         """可选的服务端浏览器诊断，检查空间、账户、专案及模型选择器；会操作网页控件，可能比普通状态查询慢。不是 create_query 的准入门槛，失败不代表服务整体不可用；每个发送操作仍会独立核验。不要高频调用。"""
         return await call(ctx, "health_check", {})
 
-    @mcp.tool()
-    async def diagnose(ctx: Context, query_id: str | None = None, message_id: str | None = None) -> dict[str, Any]:
+    @mcp.tool(structured_output=False)
+    async def diagnose(ctx: Context, query_id: str | None = None, message_id: str | None = None) -> types.CallToolResult:
         """返回任务状态、具体消息关联差异、转换记录和服务端执行环境。空间编号仅在桥接服务器有效，不要用客户端本机 ego-browser 查找。持续恢复失败时把此证据交给维护者；诊断不返回完整提示词或浏览器凭据。"""
-        return await call(ctx, "diagnose", dict(query_id=query_id, message_id=message_id))
+        return envelope(await call(ctx, "diagnose", dict(query_id=query_id, message_id=message_id)))
 
     @mcp.tool()
     async def recover_session(query_id: str, ctx: Context, message_id: str | None = None) -> dict[str, Any]:
@@ -330,6 +312,24 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
     async def delete_query(query_id: str, ctx: Context) -> dict[str, Any]:
         """明确清理已终止任务的本地正文和记录；不删除 ChatGPT 远端会话。"""
         return await call(ctx, "delete_query", dict(query_id=query_id))
+
+    descriptions = {
+        'continue_query':'在原会话追问，需提供 request_id；推荐使用 ask。',
+        'get_query_status':'查看原任务状态。', 'get_query_result':'读取累计回答和完整交付记录。',
+        'wait_query':'等待状态变化，最长 30 秒；推荐使用 wait。', 'list_queries':'分页列出自己的会话。',
+        'health_check':'检查服务端浏览器。', 'diagnose':'仅在 needs_you 且 what_to_do 无法解决时给维护者用。',
+        'recover_session':'核对原消息并恢复观察，不会重新发送。', 'retry_query':'修复问题后重试尚未发送的任务。',
+        'cancel_query':'取消排队任务，或尽力停止回答。', 'list_messages':'按顺序列出会话消息。',
+        'get_conversation_info':'查看会话地址。', 'list_artifacts':'列出文件和图片。',
+        'collect_artifacts':'重新收集原回答的文件。', 'get_artifact':'查看文件信息和下载地址。',
+        'read_artifact':'读取图片或文件；小图片直接返回，其他文件返回资源链接。',
+        'delete_query':'删除已结束任务的本地记录。',
+    }
+    for tool in mcp._tool_manager.list_tools():
+        if tool.name in descriptions:tool.description=descriptions[tool.name]
+        if not settings.mcp_legacy_tools and tool.name not in {'read_artifact','diagnose'}:
+            mcp.remove_tool(tool.name)
+    register(mcp,dispatch_http,Attachments)
 
     mcp_app = mcp.streamable_http_app()
 
