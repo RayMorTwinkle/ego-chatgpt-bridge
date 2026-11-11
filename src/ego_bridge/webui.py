@@ -6,7 +6,7 @@ import secrets
 from pathlib import Path
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse,FileResponse,RedirectResponse
+from starlette.responses import JSONResponse,FileResponse,HTMLResponse,RedirectResponse
 from starlette.routing import Route,Mount
 from starlette.staticfiles import StaticFiles
 
@@ -22,6 +22,9 @@ def ui_routes(service,clients,sessions=None):
     sessions=sessions or BrowserSessions(clients,values.get('WEB_SESSION_SECRET') or secrets.token_urlsafe(48),values.get('EGO_BRIDGE_OWNER') or settings.default_owner)
     jobs=ExportJobs(service)
     static=Path(__file__).with_name('web')
+    # Versioned asset URLs: a deploy changes the hash, so browsers never pair new HTML with cached old scripts.
+    asset_version=hashlib.sha256(b''.join((static/name).read_bytes() for name in ('app.js','md.js','style.css'))).hexdigest()[:12]
+    page=(static/'index.html').read_text().replace('{{asset_version}}',asset_version)
     allowed={'ask','wait','get','list','cancel','get_thread','wait_query','read_artifact','create_query','continue_query','get_query_status','get_query_result','list_queries','health_check','diagnose','recover_session','retry_query','cancel_query','list_messages','get_conversation_info','delete_query','list_artifacts','collect_artifacts','get_artifact'}
 
     def response(data,status=200):return JSONResponse(data,status_code=status,headers={'Cache-Control':'no-store'})
@@ -52,7 +55,7 @@ def ui_routes(service,clients,sessions=None):
         return Route(path,handle,methods=methods)
 
     async def root(request):return RedirectResponse('/ui/')
-    async def index(request):return FileResponse(static/'index.html',headers={'Cache-Control':'no-store',
+    async def index(request):return HTMLResponse(page,headers={'Cache-Control':'no-store',
         'Content-Security-Policy':"default-src 'self'; img-src 'self' blob:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"})
     async def login(request):
         data=await request.json();current=token_owner(clients,str(data.get('token','')))

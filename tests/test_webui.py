@@ -40,7 +40,7 @@ async def test_web_login_cookie_mcp_info_csrf_and_logout(tmp_path):
     app=build_app(Settings(tmp_path,default_owner='alice',tls_enabled=True),adapter=ExportBrowser(),clients={'alice':'a'*40})
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='https://localhost') as c:
-            assert (await c.get('/ui/')).status_code==200
+            page=await c.get('/ui/');assert page.status_code==200 and '/ui/assets/app.js?v=' in page.text and '{{' not in page.text
             assert (await c.get('/ui/api/me')).status_code==401
             bad=await c.post('/ui/api/login',json={'token':'wrong'});assert bad.status_code==401
             r=await c.post('/ui/api/login',json={'token':'a'*40},headers={'Origin':'https://localhost'})
