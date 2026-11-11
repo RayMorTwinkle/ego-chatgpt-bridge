@@ -1,44 +1,140 @@
 <!doctype html>
-<html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ego Research Bridge</title><link rel="stylesheet" href="/ui/assets/style.css"><script src="/ui/assets/app.js" defer></script></head>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Ego 研究</title>
+<link rel="stylesheet" href="/ui/assets/style.css">
+<script src="/ui/assets/md.js" defer></script>
+<script src="/ui/assets/app.js" defer></script>
+</head>
 <body>
-<section id="login" class="login-shell"><div class="login-card"><div class="brand-mark">E</div><p class="eyebrow">EGO RESEARCH BRIDGE</p><h1>让研究有迹可循。</h1><p class="muted">在同一个空间里管理对话、图片和文件。</p><form id="login-form"><label for="token">MCP Token</label><input id="token" name="token" type="password" autocomplete="current-password" required placeholder="输入与 MCP 相同的 token"><button class="primary" type="submit">登录工作台 <span>↗</span></button></form><p class="small muted">登录保持一年 · 仅限 EasyTier 网络</p><p id="login-error" class="error" role="alert"></p></div></section>
-<div id="app" hidden>
-<header><a class="brand" href="/ui/"><span class="brand-mark small-mark">E</span><span>Ego <b>Research Bridge</b></span></a><div class="header-actions"><span class="network-pill"><i></i> EasyTier</span><button id="mcp-open" class="secondary">MCP 接入 ↗</button><span id="owner" class="muted"></span><button id="logout" class="quiet">退出</button></div></header>
-<div class="workspace"><aside><p class="eyebrow">WORKSPACE</p><button id="nav-queries" class="nav active">◉ <span>研究任务</span></button><button id="nav-exports" class="nav">▣ <span>调试导出</span></button><div class="sidebar-bottom"><div class="sidebar-status"><i></i><span id="model">GPT-6 · 极高优先</span></div><p id="project-name" class="small muted"></p><button id="health" class="quiet">检查浏览器状态</button><p id="health-status" class="small muted" aria-live="polite"></p><p id="retention-policy" class="small muted"></p></div></aside>
-<main>
-<section id="queries-view"><div class="page-heading"><div><p class="eyebrow">RESEARCH</p><h1>研究任务</h1><p class="muted">每一次提问都有自己的对话与产物。</p></div><button id="new-open" class="primary">＋ 新建研究</button></div>
-<div class="metrics"><div><span class="metric-label">任务</span><strong id="count-total">—</strong></div><div><span class="metric-label">进行中</span><strong id="count-running">—</strong></div><div><span class="metric-label">需要处理</span><strong id="count-attention">—</strong></div><div class="metric-note"><span class="status-dot"></span>固定專案 · 独立会话 · 产物可追溯</div></div>
-<div class="query-layout"><section class="panel task-panel"><div class="panel-top"><h2>任务列表</h2><select id="status-filter" aria-label="筛选任务状态"><option value="">全部状态</option><option value="QUEUED">排队中</option><option value="GENERATING">生成中</option><option value="COMPLETED">已完成</option><option value="NEEDS_ATTENTION">需要处理</option><option value="OUTCOME_UNKNOWN">结果不确定</option></select></div><div id="task-list" class="task-list" aria-live="polite"></div></section>
-<section class="panel detail-panel"><div id="empty-detail" class="empty"><div class="empty-icon">↗</div><h2>从一个问题开始</h2><p>新建研究，或选择左侧的任务。<br>回答、图片、文件与执行记录都会保存在这里。</p></div><div id="detail" hidden><div class="detail-top"><div><span id="detail-badge" class="badge"></span><h2 id="detail-title">研究结果</h2></div><a id="conversation-link" class="text-link" target="_blank" rel="noopener noreferrer">在 ChatGPT 查看 ↗</a></div><div class="meta-line"><code id="query-id"></code><select id="message-select" aria-label="选择消息轮次"></select></div><div id="delivery-info" class="notice" hidden></div><details id="error-detail" class="error-detail" hidden><summary>执行错误与修复建议</summary><pre id="error-text"></pre><div class="button-row"><button id="recover" class="secondary">重新核对网页</button><button id="retry" class="secondary">安全重试</button></div></details><p id="input-attachments" class="small muted" hidden></p><div id="answer" class="answer"></div><div id="sources" class="sources"></div><div id="artifacts" class="artifacts"></div><div id="unsupported" class="notice" hidden></div><div class="detail-actions"><button id="collect" class="quiet">重新收集产物</button><button id="cancel" class="quiet">取消／停止</button><button id="diagnose" class="quiet">诊断记录</button></div><form id="continue-form" class="continue-form"><label for="followup">在此会话继续研究</label><textarea id="followup" rows="3" placeholder="补充问题，或要求进一步比较……" required></textarea><label for="followup-files">附件（可选）</label><input type="file" id="followup-files" multiple aria-describedby="followup-files-hint"><p class="small muted" id="followup-files-hint">最多 4 个，合计 40 MiB。随本轮问题上传到 ChatGPT。</p><div class="form-bottom"><span class="small muted">沿用同一对话上下文</span><button class="primary" type="submit">发送追问 ↑</button></div></form></div></section></div></section>
-<section id="exports-view" hidden><div class="page-heading"><div><p class="eyebrow">DEBUG EXPORT</p><h1>把一个对话带走。</h1><p class="muted">只读打包文字与产物，不发送消息、不重新生成回答。</p></div><span class="badge">仅 WebUI</span></div><div class="export-grid"><section class="panel export-compose"><h2>导出 ChatGPT 对话</h2><p class="muted">支持独立对话及任意專案内的对话。使用当前已登录的 ChatGPT 账户读取。</p><form id="export-form"><label for="export-url">对话地址</label><input id="export-url" type="url" required placeholder="https://chatgpt.com/c/…"><button class="primary" type="submit">生成调试 ZIP ↗</button></form><p id="export-retention-hint" class="small muted"></p><div class="export-includes"><h3>归档内容</h3><p>✓ 对话 Markdown 与 JSON</p><p>✓ 可获取的图片和原始文件</p><p>✓ 文件类型、大小与 SHA-256</p><p>✓ 缺失项、未完成项与采集范围</p></div><p class="small muted">长对话可能有未加载的历史分页。实际采集范围和未导出内容会写入 manifest，不会伪装为完整归档。</p></section><section class="panel"><div class="panel-top"><h2>导出记录</h2><button id="export-refresh" class="quiet">刷新</button></div><div id="export-list" class="export-list"></div></section></div></section>
-<footer><span id="runtime-path"></span><span>原始字节 · 明确状态 · 可恢复</span></footer>
-</main></div></div>
-<dialog id="new-dialog"><form id="create-form"><div class="dialog-heading"><h2>新建研究</h2><button type="button" class="close quiet" data-close="new-dialog" aria-label="关闭">×</button></div><label for="question">研究问题</label><textarea id="question" rows="7" required placeholder="描述你想深入研究的问题、约束和期待的产物……"></textarea><label for="create-files">附件（可选）</label><input type="file" id="create-files" multiple aria-describedby="create-files-hint"><p class="small muted" id="create-files-hint">最多 4 个，合计 40 MiB。随本轮问题上传到 ChatGPT。</p><div class="form-bottom"><label class="effort-label">GPT-6 <select id="effort"><option value="extra_high">极高思考</option><option value="high">高思考</option></select></label><button class="primary" type="submit">创建研究 ↑</button></div></form></dialog>
-<dialog id="mcp-dialog" aria-labelledby="mcp-title">
-<div class="dialog-heading"><div><p class="eyebrow">AGENT CONNECTION</p><h2 id="mcp-title">选择 MCP 接入方式</h2></div><button class="close quiet" data-close="mcp-dialog" aria-label="关闭">×</button></div>
-<p class="muted">能连接 EasyTier 时优先直连；不在虚拟网内的 Agent 使用公网入口。</p>
-<div class="connection-grid">
-<section class="connection-card" aria-labelledby="easytier-title"><div class="connection-heading"><h3 id="easytier-title">EasyTier 直连</h3><span class="badge">优先使用</span></div>
-<p class="small muted">传统 Bearer Token · 需要 Agent 接入 EasyTier</p><p class="small muted">直接连接本机服务，省去公网中转；实际速度取决于当前网络。</p>
-<label for="mcp-url">EasyTier MCP 地址</label><input id="mcp-url" readonly spellcheck="false"><button id="mcp-url-copy" class="quiet">复制直连地址</button>
-<label for="mcp-config">Token 接入配置</label><textarea id="mcp-config" class="connection-config" rows="10" readonly spellcheck="false"></textarea>
-<div class="button-row"><button id="mcp-copy" class="primary">复制 Token 配置</button><button id="token-copy" class="secondary">复制 Token</button></div>
-<p id="connection-hint" class="small muted"></p>
-<div id="certificate-section" hidden><p id="certificate-path" class="small muted"></p><a id="certificate-download" href="/ui/api/certificate" class="text-link">下载公有 CA 证书 ↗</a><p class="small muted">仅在主动启用自签 HTTPS 时需要信任此证书。</p></div>
+
+<section id="login" class="login-shell" hidden>
+  <div class="login-card">
+    <p class="wordmark">Ego 研究</p>
+    <h1>登录</h1>
+    <p class="muted">使用与 MCP 相同的 token。登录保持一年，仅限 EasyTier 网络。</p>
+    <form id="login-form">
+      <label for="token">Token</label>
+      <input id="token" name="token" type="password" autocomplete="current-password" required>
+      <button class="primary" type="submit">进入</button>
+    </form>
+    <p id="login-error" class="error" role="alert"></p>
+  </div>
 </section>
-<section class="connection-card" aria-labelledby="public-title"><div class="connection-heading"><h3 id="public-title">公网 HTTPS</h3><span class="badge">备用入口</span></div>
-<p class="small muted">OAuth 授权 · 适合 ChatGPT 及无法接入 EasyTier 的 Agent</p>
-<p class="small muted">Agent 无需加入 EasyTier；授权确认时，你使用的浏览器仍需连接 EasyTier。</p>
-<p id="public-unavailable" class="notice" hidden>尚未启用公网接入，当前可使用 EasyTier 直连。</p>
-<div id="oauth-section"><label for="oauth-url">公网 MCP 地址</label><input id="oauth-url" readonly spellcheck="false"><button id="oauth-copy" class="quiet">复制公网地址</button>
-<label for="oauth-config">OAuth 接入配置</label><textarea id="oauth-config" class="connection-config" rows="10" readonly spellcheck="false"></textarea>
-<button id="oauth-config-copy" class="primary">复制 OAuth 配置</button>
-<p class="small muted">支持 OAuth 的 MCP 客户端可使用此配置并完成登录。ChatGPT 中填写公网地址，认证选择 OAuth。</p></div>
-</section></div>
-<section id="credential-section" class="connection-details" hidden><h3>传统凭据</h3><p class="small muted">传统 Token 接入继续保留，与 OAuth 授权共存。Token 和 WebUI 登录凭据保存在本机文件中。</p><label for="token-path">凭据文件路径</label><input id="token-path" readonly spellcheck="false"><button id="token-path-copy" class="quiet">复制凭据路径</button></section>
-<section id="oauth-grants-section" class="connection-details" hidden><h3>OAuth 已授权应用</h3><div id="oauth-grants"></div></section>
-<p id="copy-status" class="small" aria-live="polite"></p><textarea id="manual-copy" rows="4" readonly hidden aria-label="手动复制内容" spellcheck="false"></textarea>
+
+<div id="app" class="shell" hidden>
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <p class="wordmark">Ego 研究</p>
+      <button id="new-open" class="new-button" title="新研究（N）">＋ 新研究</button>
+    </div>
+    <div class="search"><input id="search" type="search" placeholder="搜索" aria-label="搜索研究"></div>
+    <nav id="task-list" class="task-list" aria-label="研究列表" aria-live="polite"></nav>
+    <div class="sidebar-foot">
+      <button id="health" class="foot-row" title="检查服务端浏览器、账户与模型"><span class="dot"></span><span id="health-status">GPT-6 · 服务端浏览器</span></button>
+      <button id="mcp-open" class="foot-row">接入 Agent</button>
+      <button id="nav-exports" class="foot-row" hidden>导出对话</button>
+      <div class="foot-row owner-row"><span id="owner" class="muted"></span><button id="logout" class="link-button">退出</button></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <section id="thread-view" class="thread-view">
+      <header id="thread-head" class="thread-head" hidden>
+        <button id="back" class="icon-button back" aria-label="返回列表">‹</button>
+        <div class="thread-title"><h1 id="thread-title"></h1><span id="thread-status" class="status-text"></span></div>
+        <div class="thread-actions">
+          <a id="conversation-link" class="quiet-link" target="_blank" rel="noopener noreferrer" hidden>在 ChatGPT 打开 ↗</a>
+          <button id="diagnose" class="quiet-link" title="诊断记录">诊断</button>
+        </div>
+      </header>
+
+      <div id="scroller" class="scroller">
+        <div id="welcome" class="welcome" hidden>
+          <h1>想研究什么？</h1>
+          <p class="muted">在服务端的 ChatGPT 项目里用 GPT-6 深度思考。一次研究可能要十几分钟，可以关掉页面，回答和文件都会留在这里。</p>
+        </div>
+        <div id="thread" class="thread"></div>
+      </div>
+
+      <form id="composer" class="composer" hidden>
+        <div class="composer-box">
+          <div id="file-chips" class="file-chips" hidden></div>
+          <textarea id="prompt" rows="1" placeholder="描述问题、约束和希望得到的产物" aria-label="研究问题"></textarea>
+          <div class="composer-bar">
+            <label class="attach" title="附件：最多 4 个，合计 40 MiB">附件<input type="file" id="files" multiple hidden></label>
+            <select id="effort" aria-label="思考强度"><option value="extra_high">极高思考</option><option value="high">高思考</option></select>
+            <span id="composer-hint" class="composer-hint">⌘↵ 发送</span>
+            <button id="send" class="send" type="submit">开始研究</button>
+          </div>
+        </div>
+      </form>
+    </section>
+
+    <section id="exports-view" class="page" hidden>
+      <header class="page-head">
+        <button class="icon-button back" data-back aria-label="返回">‹</button>
+        <div><h1>导出对话</h1><p class="muted">只读打包任意一个自己的 ChatGPT 对话（含项目外的），不发送消息、不重新生成。</p></div>
+      </header>
+      <form id="export-form" class="inline-form">
+        <input id="export-url" type="url" required placeholder="https://chatgpt.com/c/…" aria-label="对话地址">
+        <button class="primary" type="submit">生成 ZIP</button>
+      </form>
+      <p class="small muted">包含 Markdown 与 JSON 对话、可取得的原始文件和完整性清单。长对话可能有未加载的历史分页，实际范围写在 manifest 里。<span id="export-retention-hint"></span></p>
+      <div class="section-head"><h2>导出记录</h2><button id="export-refresh" class="quiet-link">刷新</button></div>
+      <div id="export-list" class="export-list"></div>
+    </section>
+  </main>
+</div>
+
+<dialog id="mcp-dialog" aria-labelledby="mcp-title">
+  <div class="dialog-head"><h2 id="mcp-title">接入 Agent</h2><button class="icon-button" data-close="mcp-dialog" aria-label="关闭">×</button></div>
+  <p class="muted">能连 EasyTier 的 Agent 用直连；不在虚拟网内的（例如 ChatGPT）用公网 OAuth 入口。</p>
+
+  <section class="connection">
+    <div class="connection-head"><h3>EasyTier 直连</h3><span class="tag">推荐</span></div>
+    <p class="small muted">Bearer Token。EasyTier 内走 HTTP，不用导入证书。</p>
+    <label for="mcp-url">MCP 地址</label>
+    <div class="copy-field"><input id="mcp-url" readonly spellcheck="false"><button id="mcp-url-copy" class="secondary">复制</button></div>
+    <label for="mcp-config">配置（含你的 token）</label>
+    <textarea id="mcp-config" class="code-field" rows="8" readonly spellcheck="false"></textarea>
+    <div class="button-row"><button id="mcp-copy" class="primary">复制配置</button><button id="token-copy" class="secondary">只复制 Token</button></div>
+    <p id="connection-hint" class="small muted"></p>
+    <div id="certificate-section" hidden><p id="certificate-path" class="small muted"></p><a id="certificate-download" href="/ui/api/certificate" class="quiet-link">下载 CA 证书 ↗</a><p class="small muted">仅在启用自签 HTTPS 时需要信任此证书。</p></div>
+  </section>
+
+  <section class="connection">
+    <div class="connection-head"><h3>公网 HTTPS</h3><span class="tag muted-tag">备用</span></div>
+    <p class="small muted">OAuth 授权。Agent 无需加入 EasyTier，但你确认授权时用的浏览器要在 EasyTier 内。</p>
+    <p id="public-unavailable" class="notice" hidden>尚未启用公网入口。</p>
+    <div id="oauth-section">
+      <label for="oauth-url">公网 MCP 地址</label>
+      <div class="copy-field"><input id="oauth-url" readonly spellcheck="false"><button id="oauth-copy" class="secondary">复制</button></div>
+      <label for="oauth-config">OAuth 配置</label>
+      <textarea id="oauth-config" class="code-field" rows="6" readonly spellcheck="false"></textarea>
+      <button id="oauth-config-copy" class="primary">复制 OAuth 配置</button>
+      <p class="small muted">在 ChatGPT 里填公网地址，认证选 OAuth。</p>
+    </div>
+  </section>
+
+  <section id="credential-section" class="connection" hidden>
+    <h3>凭据文件</h3>
+    <div class="copy-field"><input id="token-path" readonly spellcheck="false"><button id="token-path-copy" class="secondary">复制</button></div>
+  </section>
+  <section id="oauth-grants-section" class="connection" hidden><h3>已授权的应用</h3><div id="oauth-grants"></div></section>
+  <p id="copy-status" class="small" aria-live="polite"></p>
+  <textarea id="manual-copy" class="code-field" rows="4" readonly hidden aria-label="手动复制内容" spellcheck="false"></textarea>
 </dialog>
-<dialog id="diagnose-dialog"><div class="dialog-heading"><h2>诊断记录</h2><button class="close quiet" data-close="diagnose-dialog" aria-label="关闭">×</button></div><pre id="diagnose-text"></pre></dialog>
+
+<dialog id="diagnose-dialog" class="wide-dialog">
+  <div class="dialog-head"><h2>诊断记录</h2><button class="icon-button" data-close="diagnose-dialog" aria-label="关闭">×</button></div>
+  <p class="small muted">交给维护者排查用。不含完整提示词和浏览器凭据。</p>
+  <pre id="diagnose-text"></pre>
+</dialog>
+
 <div id="toast" role="status" aria-live="polite" hidden></div>
-</body></html>
+</body>
+</html>
