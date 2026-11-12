@@ -61,7 +61,7 @@ SQLite 使用 WAL、synchronous=FULL、foreign_keys 和启动 quick_check，损�
 
 ## 页面及产物
 
-空间按唯一精确名称定位，ID 仅属于当前 Ego 实例；旧 ID 指向其他名称时，若能找到唯一同名空间则自动迁移并记录 `SPACE_REBOUND`，不会接管旧 ID 指向的空间。找不到同名空间时不能区分重命名与编号复用，仍停止并返回配置编号、对应名称和同名候选编号。默认独占模式自动接管，空间丢失后允许重建并将迁移写入私有 runtime-events.jsonl；重建不等于历史恢复，仍按精确会话与消息核验。关闭 force_space_takeover 或 recreate_missing_space 可改为停止策略。页面标签只是提示，失效后使用已验证 Conversation ID 和 URL 重连，不猜标题。
+空间按唯一精确名称定位，ID 仅属于当前 Ego 实例；旧 ID 指向其他名称时，若能找到唯一同名空间则自动迁移并记录 `SPACE_REBOUND`，不会接管旧 ID 指向的空间。找不到同名空间时，默认按配置名称自动新建专用空间，即使旧 ID 已被其他名称占用；无需判断是重命名还是编号复用，不修改其他名称的空间。默认独占模式自动接管，迁移写入私有 runtime-events.jsonl，包含新旧编号、重建原因和 `history_restored=false`；重建不等于历史恢复，仍按精确会话与消息核验。关闭 force_space_takeover 或 recreate_missing_space 可改为停止策略。名称不唯一或 API 回执名称不符仍停止。页面标签只是提示，失效后使用已验证 Conversation ID 和 URL 重连，不猜标题；生成中的观察也会重新打开原会话，不重新发送问题。已发送但尚未取得正式会话地址时，不以新空白页代替原会话。
 
 新会话的 local-chatgpt 临时地址不会登记为正式 Conversation ID。只有基线和带请求标记的用户消息核验通过后才绑定正式地址；旧版本保存的临时地址也只能在同样核验后升级，不能更换已确认的正式地址。
 
@@ -165,7 +165,7 @@ MCP 與 HTTP API 收到通過驗證的研究提交後，`service.log` 記下 `su
 | ATTACHMENT_UPLOAD_FAILED | 上传动作无发送路径；保留暂存字节并重试本操作附件。 |
 | ATTACHMENT_UPLOAD_INCOMPLETE | 附件尚未可发送，允许再次准备。 |
 | DRAFT_ATTACHMENT_MISMATCH | 发送前校验失败；只清理带本操作标记的代理草稿，不覆盖其他草稿。 |
-| SPACE_IDENTITY_MISMATCH | 不盲目重试。唯一精确名称匹配时先自动迁移；其他情况身份不确定，需人工处理。 |
+| SPACE_IDENTITY_MISMATCH | API 回执名称与配置不符时停止。旧编号指向其他名称本身不触发此错误：按唯一精确名称迁移，名称不存在则按 recreate_missing_space 策略新建。 |
 | GENERATION_TIMEOUT | 保留 NEEDS_ATTENTION；已经提交，不能重发或自动延长用户硬超时。可手动只读对账。 |
 | ARTIFACT_CAPTURE_FAILED | 整轮回答已核验完成、仅缺原始文件时自动重收三次；每次重新核对原会话／请求／消息。不重新生成。不支持的音视频或交互输出不做无效重试。 |
 | 其他错误 | 默认不自动重试。LOGIN_REQUIRED、ACCOUNT_MISMATCH、PROJECT_MISMATCH、CONVERSATION_MISMATCH、HISTORY_CHANGED、SPACE_AMBIGUOUS、MODEL_UNAVAILABLE、EFFORT_UNAVAILABLE、MODEL_MISMATCH、UI_CHANGED、草稿冲突或附件字节缺失等需要身份／内容／环境修复。 |
@@ -176,4 +176,4 @@ OUTCOME_UNKNOWN 会在 15 秒后、执行名额可用时自动调用一次 recov
 
 观察到正式会话且消息关联通过后，顺便读取 document.title，去除尾部 ChatGPT 品牌后缀并排除默认标题，写入 queries.chat_title。缺失或默认标题不影响任务完成，也不清除已知标题；新会话默认为 null。list_queries、get_query_status、get_query_result（含 compact）均返回 chat_title。此字段依赖实际渲染页面，不保证在 ChatGPT 生成标题前就能取得。
 
-此次排查只读取了现存 service.log 及 5 份 .gz 轮换：均未记录 SPACE_IDENTITY_MISMATCH 或空间身份上下文，无法认定两次线上失败的确切原因。离线回归测试复现并修复了“旧编号被其他空间复用、正确名称在新编号上”的分支；真正的用户重命名仍需人工确认，不推断它与编号复用等价。
+空间恢复回归覆盖旧编号被复用且原名称已不存在、原名称迁移到新编号、名称重复、关闭自动重建，以及观察任务按原会话地址重开标签页。重建只恢复运行环境，消息关联仍通过基线历史及唯一请求标记核验。

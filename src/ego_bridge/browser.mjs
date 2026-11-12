@@ -65,11 +65,12 @@ async function runtimeSpace() {
     persisted_id_name:persisted?.name??null,named_ids:named.map(s=>s.id)};
   // Ego IDs are instance-local. A reused ID must never override the exact name.
   let entry=named[0];
-  if(!entry&&persisted)fail('SPACE_IDENTITY_MISMATCH','旧空间编号指向不同名称，且找不到配置名称；不能推断是重命名还是编号复用。');
   if(!entry){
     if(!input.recreate_missing_space)fail('SPACE_MISSING','专用空间不存在，自动重建未开启。');
     const created=await taskSpace(input.space_name);
-    receipt.runtime_space={previous_id:input.space_id,space_id:created.spaceId,name:created.name,recreated:true,history_restored:false};
+    if(created.name!==input.space_name)fail('SPACE_IDENTITY_MISMATCH','新建回执的空间名称与配置不一致，停止操作。');
+    receipt.runtime_space={previous_id:input.space_id,space_id:created.spaceId,name:created.name,recreated:true,history_restored:false,
+      reason:persisted?'configured_name_missing_old_id_reused':'configured_name_missing'};
     return created;
   }
   let task;
@@ -134,7 +135,9 @@ async function choosePage(task, create=false) {
     if(input.action==='prepare') await usable(page);
     return page;
   }
-  if(!create) fail('TAB_MISSING','找不到关联标签页，不能猜测另一条会话。');
+  // A saved, verified conversation URL survives the browser/space. Reopening it
+  // for observation is read-only; an unbound send must still be reconciled.
+  if(!create&&!(input.action==='observe'&&input.conversation_url)) fail('TAB_MISSING','找不到关联标签页，不能猜测另一条会话。');
   const page=await freshPage(task);
   receipt.page_label=page.label;
   try {await page.goto(input.conversation_url??input.project_url,{timeout:10000});}

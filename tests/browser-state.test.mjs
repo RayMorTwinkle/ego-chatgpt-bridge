@@ -258,13 +258,47 @@ test('control locator prioritizes test IDs, handles hidden duplicates and all lo
   assert.ok(findControl({selectors:CONTROLS.modelMenu,kind:'modelMenu',mark:true}));
 });
 
-test('ambiguous names and unconfirmed renames never claim a space',async()=>{
+test('missing named space is recreated even when its old ID belongs to another space',async()=>{
+  const {readFile}=await import('node:fs/promises');
+  const source=await readFile(new URL('../src/ego_bridge/browser.mjs',import.meta.url),'utf8');
+  const fn=source.slice(source.indexOf('async function runtimeSpace()'),source.indexOf('\nasync function state('));
+  const run=new Function('input','receipt','listTaskSpaces','taskSpace','claimTaskSpace','takeOverTaskSpace','fail',`${fn};return runtimeSpace();`);
+  for(const spaces of [[],[{id:2,name:'other',ownership:'user'}]]){
+    const receipt={},created=[];
+    const task=await run({space_id:2,space_name:'bridge',recreate_missing_space:true,force_space_takeover:true},receipt,
+      async()=>spaces,async name=>{created.push(name);return {spaceId:9,name:'bridge'};},
+      ()=>assert.fail('must not claim unrelated space'),()=>assert.fail('must not take over unrelated space'),code=>{throw Error(code);});
+    assert.equal(task.spaceId,9);assert.deepEqual(created,['bridge']);
+    assert.equal(receipt.runtime_space.recreated,true);assert.equal(receipt.runtime_space.history_restored,false);
+    assert.equal(receipt.runtime_space.previous_id,2);
+    assert.equal(receipt.runtime_space.reason,spaces.length?'configured_name_missing_old_id_reused':'configured_name_missing');
+  }
+});
+
+test('ambiguous names and disabled recreation never claim or create a space',async()=>{
   const {readFile}=await import('node:fs/promises');
   const source=await readFile(new URL('../src/ego_bridge/browser.mjs',import.meta.url),'utf8');
   const fn=source.slice(source.indexOf('async function runtimeSpace()'),source.indexOf('\nasync function state('));
   const run=new Function('input','receipt','listTaskSpaces','fail',`${fn};return runtimeSpace();`);
-  const input={space_id:2,space_name:'bridge',force_space_takeover:true};
-  for(const [spaces,code] of [ [[{id:2,name:'renamed'}],'SPACE_IDENTITY_MISMATCH'], [[{id:2,name:'bridge'},{id:3,name:'bridge'}],'SPACE_AMBIGUOUS'] ]){
+  const input={space_id:2,space_name:'bridge',force_space_takeover:true,recreate_missing_space:false};
+  for(const [spaces,code] of [ [[], 'SPACE_MISSING'], [[{id:2,name:'renamed'}],'SPACE_MISSING'], [[{id:2,name:'bridge'},{id:3,name:'bridge'}],'SPACE_AMBIGUOUS'] ]){
     await assert.rejects(run(input,{},async()=>spaces,code=>{throw Error(code);}),new RegExp(code));
   }
+});
+
+test('observation reopens its verified conversation after space loss without using a reused page label',async()=>{
+  const {readFile}=await import('node:fs/promises');
+  const source=await readFile(new URL('../src/ego_bridge/browser.mjs',import.meta.url),'utf8');
+  const fn=source.slice(source.indexOf('async function choosePage('),source.indexOf('\nasync function freshPage('));
+  const run=new Function('input','receipt','identity','freshPage','usable','fail',`${fn};return task=>choosePage(task);`);
+  const url='https://chatgpt.com/g/project/c/original',visited=[];
+  const page={label:'p2',goto:async target=>visited.push(target)};
+  const receipt={runtime_space:{recreated:true,space_id:9}};
+  const input={action:'observe',space_id:2,page_label:'p1',conversation_url:url,project_id:'project'};
+  const choose=run(input,receipt,url=>({conversation:url.split('/c/')[1]}),async()=>page,async()=>{},code=>{throw Error(code);});
+  const task={tabs:async()=>[{label:'p1',url:'about:blank'}],page:()=>assert.fail('must ignore old label')};
+  assert.equal(await choose(task),page);assert.deepEqual(visited,[url]);assert.equal(receipt.page_label,'p2');
+  input.conversation_url=null;
+  await assert.rejects(choose(task),/TAB_MISSING/);
+  assert.deepEqual(visited,[url]);
 });
