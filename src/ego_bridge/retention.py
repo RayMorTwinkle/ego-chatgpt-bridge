@@ -193,10 +193,14 @@ class Retention:
                 for path in ([] if backups.is_symlink() else backups.rglob('*.zip')):
                     if path.is_symlink() or not path.is_file():continue
                     try:
-                        expiry=backup_expiry(path,s.artifact_retention_days)
+                        try: expiry=backup_expiry(path,s.artifact_retention_days)
+                        except zipfile.BadZipFile:
+                            # An unreadable archive cannot be restored anyway; let it age
+                            # out by mtime instead of erroring on every sweep forever.
+                            expiry=path.stat().st_mtime+s.artifact_retention_days*DAY
                         if expiry<=at:
                             size=path.stat().st_size;path.unlink();report['backups_removed']+=1;report['bytes_removed']+=size
-                    except (OSError,ValueError,KeyError,RuntimeError,zipfile.BadZipFile) as error:
+                    except (OSError,ValueError,KeyError,RuntimeError) as error:
                         report['errors'].append({'area':'backup','type':type(error).__name__})
         except BlockingIOError:report['skipped']='backup_in_progress'
         report['logs']=rotate_logs(s,at=at)

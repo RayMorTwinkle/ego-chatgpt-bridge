@@ -31,6 +31,18 @@ def environment(tmp_path,**options):
     return store,service,exports,retention
 
 
+async def test_unreadable_backup_ages_out_instead_of_erroring_forever(tmp_path):
+    store,service,exports,retention=environment(tmp_path)
+    backups=tmp_path/'backups';backups.mkdir()
+    young=backups/'young-corrupt.zip';young.write_bytes(b'not a zip at all')
+    stale=backups/'stale-corrupt.zip';stale.write_bytes(b'not a zip at all');os.utime(stale,(0,0))
+    report=retention.sweep()
+    assert not report['errors'] and not stale.exists() and young.exists()
+    report=retention.sweep()
+    assert report['backups_removed']==0 and not report['errors']
+    store.close()
+
+
 def finished(store,op):
     store.db.execute("UPDATE operations SET status='COMPLETED',result=? WHERE id=?",(json.dumps({'content':'preserved text','completeness_signal':'complete','delivery_complete':True,'artifacts':[]}),op['id']))
 
