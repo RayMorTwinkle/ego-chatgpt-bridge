@@ -152,6 +152,8 @@ HTTPS 是可选部署方式：主动设置 `tls_enabled=true` 后运行 `renew-t
 策略可在 `config.json` 调整，修改后重启；现有文件的到期时间固定记录，新采集采用新配置。`diagnose` 返回保留策略和最近清理结果，运行目录 `retention.json` 保存清理回执。`.env`、TLS密钥和对话文字不会因文件轮换而删除。
 
 
+v0.5.3：观察轮询自适应——正文流动时保持 4 秒快节奏，安静页面退到 20 秒（`quiet_poll_seconds` 可调），已安排的自动重试永不因退避迟到；超时根因（每次轮询独立进程）详见 operations.md 的执行成本小节。OAuth：`reconcile` 纳入写权限（与 recover_session 同级的浏览器驱动动作）；access/refresh/code/pending/grant 对象随保留策略每小时回收，已用 refresh 行存活满全期以保住重放撤销语义，撤销记录保留 31 天。调试 ZIP 导出改为逐浏览器调用持锁，不再长时间独占 worker。
+
 v0.5.2：观察/对账阶段（只读、永不重发）的瞬时失败——浏览器超时、连接失败、页面加载失败等——改为服务端自动重试（各 3 次，15/60/180 秒退避），不再把已发送任务停在 needs_you 等人核对；发送后对账同样最多 3 次。历史遗留的此类卡死任务启动后自动接续核对。v2 MCP 新增 `reconcile` 工具供重试用尽后手动只读对账；`ask` 去重不再返回已取消/已失败的死任务，发送前失败的同内容请求直接重新排队。所有浏览器操作超时下限提高到 150 秒（submit/带附件 prepare 180 秒），worker 异常带堆栈写入日志，HTTP 恢复操作不再被整轮 worker 迭代长时间阻塞。
 
 v0.4.3：完成判定要求整轮 `complete`、无停止生成按钮、产物渲染就绪，并跨至少两次观察保持内容/产物描述不变（默认至少4秒）。`generation_done` 只说明网页标记结束，`extraction_stable` 表示已通过上述确认；`complete` 仍不是研究质量验收，`semantic_validation=not_performed`。正文提取提供 Markdown 表格/内联链接及 DOM 字数、块 ID、anchor 数和覆盖范围证据。仅覆盖当前可见回答 DOM，不保证未渲染/虚拟分页内容不存在。

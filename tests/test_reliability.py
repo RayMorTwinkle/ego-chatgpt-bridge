@@ -217,9 +217,31 @@ async def test_legacy_observation_timeout_attention_self_heals(rig,monkeypatch):
     assert db.operation(a['message_id'])['status']=='COMPLETED' and len(fake.sent)==1
 
 
+async def test_poll_interval_adapts_and_never_oversleeps_a_scheduled_retry(tmp_path,monkeypatch):
+    from ego_bridge.service import Service
+    clock=[1000.0];monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
+    db=Store(tmp_path);s=Service(Settings(tmp_path,poll_seconds=4,quiet_poll_seconds=20,completion_confirm_seconds=0),db,FakeBrowser())
+    try:
+        # Streaming keeps the fast cadence; a quiet page backs off.
+        assert s.poll_interval(True)==4 and s.poll_interval(False)==20
+        a=await create(s)
+        # A retry due within the quiet window clamps the sleep to the deadline.
+        db.patch(a['message_id'],auto_retry=dict(kind='observe',attempts=1,max=3,next_at=1007,counters={'observe':1}))
+        assert s.poll_interval(False)==7 and s.poll_interval(True)==4
+        # An already-due retry wakes immediately (bounded floor only).
+        db.patch(a['message_id'],auto_retry=dict(kind='observe',attempts=1,max=3,next_at=999,counters={'observe':1}))
+        assert s.poll_interval(False)==0.05
+        # QUEUED prepare retries clamp the same way, from any status.
+        db.transition(a['message_id'],'NEEDS_ATTENTION')
+        db.patch(a['message_id'],auto_retry=dict(kind='prepare',attempts=1,max=3,next_at=1010,counters={'prepare':1}))
+        assert s.poll_interval(False)==10
+    finally:
+        db.close()
+
+
 @pytest.fixture
 def rig(tmp_path):
-    settings = Settings(tmp_path, poll_seconds=0.01, completion_confirm_seconds=0)
+    settings = Settings(tmp_path, poll_seconds=0.01, quiet_poll_seconds=0.01, completion_confirm_seconds=0)
     store = Store(tmp_path)
     fake = FakeBrowser()
     service = Service(settings, store, fake)

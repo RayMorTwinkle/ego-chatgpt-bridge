@@ -155,9 +155,9 @@ MCP 與 HTTP API 收到通過驗證的研究提交後，`service.log` 記下 `su
 
 | 错误码 | 决策及理由 |
 | --- | --- |
-| BROWSER_OPERATION_FAILED | 仅 prepare 自动重试；定位／点击账户、模型等失败不可能发送消息。submit 阶段转 OUTCOME_UNKNOWN。 |
-| BROWSER_TIMEOUT | 仅 prepare 自动重试；可能产生草稿等页面效果，但没有发送路径。submit 超时保留 OUTCOME_UNKNOWN。 |
-| EGO_CONNECTION_FAILED | prepare 未收到回执仍可重试，因为这个动作不会发送；submit 无回执必须对账。 |
+| BROWSER_OPERATION_FAILED | 仅 prepare 与只读观察自动重试；定位／点击账户、模型等失败不可能发送消息。submit 阶段转 OUTCOME_UNKNOWN。 |
+| BROWSER_TIMEOUT | prepare 与只读观察自动重试；可能产生草稿等页面效果，但没有发送路径。submit 超时保留 OUTCOME_UNKNOWN。 |
+| EGO_CONNECTION_FAILED | prepare 与观察未收到回执仍可重试，因为这些动作不会发送；submit 无回执必须对账。 |
 | EGO_UNAVAILABLE | 找不到 Ego CLI，没有发送，有限重试等待环境恢复。 |
 | PAGE_LOAD_FAILED | 编辑器加载失败，没有发送，允许重试加载。 |
 | TAB_MISSING | prepare 找不到原页，没有发送，允许重新定位；仍执行会话／历史核验。 |
@@ -172,7 +172,13 @@ MCP 與 HTTP API 收到通過驗證的研究提交後，`service.log` 記下 `su
 
 文件重收退避期间保留 GENERATING，`generation_complete=true`、`delivery_complete=false`，不提前要求人工处理；三次仍失败才 NEEDS_ATTENTION。重收时的暂时性观察错误也占用同一重收预算，身份／关联错误立即停止。
 
-OUTCOME_UNKNOWN 会在 15 秒后、执行名额可用时自动调用一次 recover（与 recover_session 相同的只读消息对账逻辑）。先持久化消耗本次机会，再读原对话；基线、唯一请求标记和消息数对得上才恢复观察或完成，失败保持错误供人工核对。空间接管、重新打开原 URL 属于恢复导航，不发送消息、不切模型。
+OUTCOME_UNKNOWN 会在 15 秒后、执行名额可用时自动调用 recover（与 recover_session 相同的只读消息对账逻辑），退避 15 / 60 / 180 秒共 3 次。先持久化消耗本次机会，再读原对话；基线、唯一请求标记和消息数对得上才恢复观察或完成，三次仍失败保持错误供人工核对。历史遗留的“观察超时被停在 NEEDS_ATTENTION”任务在启动后由同一扫描自动接续核对。空间接管、重新打开原 URL 属于恢复导航，不发送消息、不切模型。
+
+### 观察节奏与执行成本
+
+每次浏览器动作都是一次独立的 `ego-browser nodejs` 子进程：Ego 冷启动、空间接管协商和页面读取都在该次超时预算内（只读动作下限 150 秒，submit 与带附件 prepare 为 180 秒，可在 config.json 用 browser_timeout 继续上调）。观察轮询是自适应的：正文、来源或产物在变时保持 `poll_seconds`（默认 4 秒）快节奏；内容安静且无待确认完成信号时退到 `quiet_poll_seconds`（默认 20 秒），已安排的自动重试始终把睡眠钳制在其到期时刻，不会因退避而迟到。
+
+根治方向是 ego-browser 的 `--session` 常驻 runtime（同 id 顶层变量跨调用保留、单会话串行、超时或客户端被杀后下次自动重建，与桥的失败语义一致）。当前实测限制：`--session` 配合管道 stdin 时脚本会执行但输出不随本次调用返回（实测积压到会话结束才吐出），`-e` 模式下 `console.log` 同样不回显、仅以裸 JSON 返回最后表达式的值。桥的回执协议依赖调用结束时的 `EGO_BRIDGE_JSON:` 标签行，且超长提示词需要 stdin 管道传递，故暂不迁移；待 CLI 修复会话回传（或改用“最后表达式值”协议并解决 `-e` 参数长度）后，可将空间接管结果缓存在会话内，消除每次轮询的进程与协商成本。
 
 观察到正式会话且消息关联通过后，顺便读取 document.title，去除尾部 ChatGPT 品牌后缀并排除默认标题，写入 queries.chat_title。缺失或默认标题不影响任务完成，也不清除已知标题；新会话默认为 null。list_queries、get_query_status、get_query_result（含 compact）均返回 chat_title。此字段依赖实际渲染页面，不保证在 ChatGPT 生成标题前就能取得。
 

@@ -19,7 +19,7 @@ from test_artifacts import FileBrowser, PNG
 @pytest.fixture
 async def rig(tmp_path):
     db=Store(tmp_path);browser=FakeBrowser()
-    service=Service(Settings(tmp_path,completion_confirm_seconds=0,poll_seconds=.01),db,browser)
+    service=Service(Settings(tmp_path,completion_confirm_seconds=0,poll_seconds=.01,quiet_poll_seconds=.01),db,browser)
     yield service,db,browser
     await service.stop();db.close()
 

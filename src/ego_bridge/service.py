@@ -426,20 +426,43 @@ class Service:
                 await self.observe(self.store.operation(op['id']),recover=True)
 
     async def run(self):
+        signatures: dict[str, tuple] = {}
         while True:
+            fast = False
             try:
                 # Polling only reads known pages. A failed observation never triggers a send.
                 # Control is held per operation so API-side recovery stays responsive.
-                for op in self.store.active():
-                    if op["status"] in {"WAITING_FOR_RESPONSE", "GENERATING"} and self.retry_due(op):
-                        async with self.control:
-                            self.clear_retry_due(op)
-                            await self.observe(self.store.operation(op["id"]))
+                active = self.store.active()
+                for op in active:
+                    if op["status"] in {"WAITING_FOR_RESPONSE", "GENERATING"}:
+                        if self.retry_due(op):
+                            async with self.control:
+                                self.clear_retry_due(op)
+                                await self.observe(self.store.operation(op["id"]))
+                        current = self.store.operation(op["id"])
+                        result = current.get("result") or {}
+                        # Quiet means no content/turn movement and no pending completion
+                        # confirmation — only then may the observation cadence back off.
+                        signature = (current["status"], len(result.get("content", "")), len(result.get("sources") or []),
+                                     len(result.get("artifacts") or []), (result.get("completion_confirmation") or {}).get("samples", 0))
+                        if signature != signatures.get(op["id"]):
+                            signatures[op["id"]] = signature
+                            fast = True
+                        if result.get("completeness_signal") == "confirming":
+                            fast = True
+                for stale in [key for key in signatures if key not in {op["id"] for op in active}]:
+                    signatures.pop(stale)
                 await self.automatic_recovery()
                 occupied = len(self.store.active())
                 for op in [o for o in self.store.candidates() if self.retry_due(o)][:max(0, self.settings.max_active - occupied)]:
                     async with self.control:
                         await self.execute(op)
+                # An operation that just crossed into active (fresh submission,
+                # requeue or a recovered task) has never been observed: keep the
+                # fast cadence until the first observation provides evidence.
+                for op in self.store.active():
+                    if op["status"] in {"WAITING_FOR_RESPONSE", "GENERATING"} and op["id"] not in signatures:
+                        fast = True
                 self.last_worker_error = None
             except asyncio.CancelledError:
                 raise
@@ -448,13 +471,32 @@ class Service:
                 logger.exception("worker iteration failed")
             self.wake.clear()
             try:
-                await asyncio.wait_for(self.wake.wait(), self.settings.poll_seconds)
+                await asyncio.wait_for(self.wake.wait(), self.poll_interval(fast))
             except TimeoutError:
                 pass
 
     @staticmethod
     def retry_due(op):
         return ((op.get('auto_retry') or {}).get('next_at') or 0)<=now()
+
+    def scheduled_retry_at(self):
+        """Earliest pending automatic retry across all operations, if any."""
+        values=[]
+        for row in self.store.db.execute("SELECT auto_retry FROM operations WHERE auto_retry IS NOT NULL").fetchall():
+            try: value=(json.loads(row[0]) or {}).get('next_at')
+            except (ValueError,TypeError): continue
+            if value is not None: values.append(value)
+        return min(values) if values else None
+
+    def poll_interval(self, fast: bool) -> float:
+        # Streaming content keeps the fast cadence; a quiet page backs off to cut
+        # the per-observation process cost. A scheduled retry always clamps the
+        # sleep so backing off never delays reconciliation or requeue.
+        interval = self.settings.poll_seconds if fast else self.settings.quiet_poll_seconds
+        due = self.scheduled_retry_at()
+        if due is not None:
+            interval = min(interval, max(0.05, due - now()))
+        return interval
 
     async def execute(self, op):
         op=self.store.operation(op['id'])

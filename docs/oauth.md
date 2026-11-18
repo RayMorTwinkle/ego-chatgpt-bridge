@@ -26,7 +26,7 @@
 
 支持 DCR（不是 CIMD）、授权码+PKCE S256、public/confidential clients、refresh token 轮换及 RFC8707 resource audience。默认回调允许 `chatgpt.com` HTTPS 及 loopback HTTP（Codex）；其他 HTTPS host 需由管理员显式加入配置。仅精确注册的回调可用于授权；服务器不抓取任意客户端元数据 URL。
 
-凭证保存在0600的 SQLite：access/refresh/code 存 SHA-256，客户端 secret 依 MCP SDK 接口要求存于私有数据库。access 有效一小时，refresh 最长30天并每次换新，授权最长一年。刷新重放会撤销整个授权。撤销或管理 token 轮换后旧凭证失效（管理 token 变更后需重启载入）。SQLite 备份含 OAuth 客户端凭据，必须作为私密归档保管。
+凭证保存在0600的 SQLite：access/refresh/code 存 SHA-256，客户端 secret 依 MCP SDK 接口要求存于私有数据库。access 有效一小时，refresh 最长30天并每次换新，授权最长一年。刷新重放会撤销整个授权。撤销或管理 token 轮换后旧凭证失效（管理 token 变更后需重启载入）。失效超过一天的 access/code/临时授权、过期 refresh 及超过保留期的授权记录由保留策略每小时回收；已用 refresh 行会存活满全期，保证重放检测仍能撤销整个授权。工作台的授权列表展示撤销记录 31 天。SQLite 备份含 OAuth 客户端凭据，必须作为私密归档保管。
 
 权限：`research:read` 读取当前身份的研究及产物，`research:write` 创建/追问/停止/恢复/清理与浏览器健康检查。默认申请两者；只读连接不能执行写操作。OAuth 不授予 WebUI 调试导出权限。
 

@@ -152,7 +152,7 @@ def build_app(settings: Settings, *, adapter=None, clients=None, store=None):
     web_routes,exports = ui_routes(service,clients,sessions=oauth.sessions if oauth else None)
     oauth_routes=oauth.routes() if oauth else []
     from .retention import Retention, LeasedFileResponse
-    retention=Retention(service,exports)
+    retention=Retention(service,exports,oauth)
     service.retention=retention
     security = TransportSecuritySettings(allowed_hosts=[item for h in settings.allowed_hosts for item in (h, f"{h}:*")], allowed_origins=[])
     class BridgeMCP(FastMCP):

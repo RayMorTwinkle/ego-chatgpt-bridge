@@ -109,8 +109,8 @@ def rotate_logs(settings, *, at=None):
 
 
 class Retention:
-    def __init__(self,service,exports):
-        self.service,self.exports=service,exports
+    def __init__(self,service,exports,oauth=None):
+        self.service,self.exports,self.oauth=service,exports,oauth
         self.settings=service.settings;self.task=None;self.last=None
         previous=self.settings.runtime/'retention.json'
         try:self.last=json.loads(previous.read_text())
@@ -155,6 +155,11 @@ class Retention:
                         report['bytes_removed']+=size
                         if row['status']!='EXPIRED':report['exports_expired']+=1
                     except OSError as error:report['errors'].append({'area':'export','type':type(error).__name__})
+                # OAuth tokens are opaque and only stored hashed, but their rows
+                # accumulate with every refresh; collect the dead ones hourly.
+                try:
+                    report['oauth_objects_removed']=self.oauth.gc(at=at) if self.oauth else 0
+                except Exception as error:report['errors'].append({'area':'oauth','type':type(error).__name__})
                 # Stale staging bytes from interrupted captures, only when there are no
                 # browser/export operations or file readers that might still own them.
                 busy=db.execute("SELECT 1 FROM operations WHERE status IN ('QUEUED','PREPARING','SUBMITTING','WAITING_FOR_RESPONSE','GENERATING') LIMIT 1").fetchone()

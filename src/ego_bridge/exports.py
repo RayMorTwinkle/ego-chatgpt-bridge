@@ -69,56 +69,61 @@ class ExportJobs:
         if not re.fullmatch(r'export_[0-9a-f]{32}',job):raise BridgeError('EXPORT_NOT_FOUND','无效导出标识。')
         return self.root/job
 
+    async def browser(self,action,**arguments):
+        # Per-call locking: a long export must not starve the worker's own
+        # observations for the many minutes its captures can take.
+        async with self.service.control:
+            return await self.service.adapter.call(action,**arguments)
+
     async def run(self,owner,job):
         page_label=None;url=self.get(owner,job)['url']
         folder=self.directory(job);folder.mkdir(mode=0o700,exist_ok=True)
         try:
-            async with self.service.control:
-                self.db.execute("UPDATE debug_exports SET status='RUNNING',updated_at=? WHERE id=?",(now(),job))
-                observed=await self.service.adapter.call('debug_observe',conversation_url=url)
-                page_label=observed['page_label'];state=observed['state'];turns=state['turns']
-                manifest={'export_id':job,'conversation_url':url,'created_at':now(),'read_only':True,
-                          'history_scope':'rendered_conversation','history_pagination_verified':False,'turn_count':len(turns),
-                          'artifacts':[],'external_images':[],'warnings':['长对话的服务端历史分页尚未验证；归档记录的是本轮已加载的对话内容。']}
-                lines=['# ChatGPT 对话导出',f'\n来源：{url}\n']
-                files=[]
-                for n,turn in enumerate(turns,1):
-                    lines.extend([f'## {n}. 用户',turn.get('user_text',''),f'## {n}. ChatGPT',turn.get('assistant_text','')])
-                    for link in turn.get('sources',[]):lines.append(f"- {link.get('title','链接')}: {link['url']}")
-                    for link in turn.get('external_images',[]):
-                        manifest['external_images'].append({'turn':n,**link})
-                        lines.append(f"- 网页引用图片（仅链接） {link.get('title','图片')}: {link['url']}")
-                    if turn.get('state')!='complete':manifest['warnings'].append(f'第 {n} 轮尚未完成生成。')
-                    if not turn.get('render_ready',True):manifest['warnings'].append(f'第 {n} 轮的回答正文或图片尚未完成网页渲染，不能确认内容完整。')
-                    for gap in turn.get('unsupported_outputs',[]):manifest['warnings'].append(f"第 {n} 轮的 {gap['kind']} 预览尚不支持导出原始文件。")
-                    for index,candidate in enumerate(turn.get('artifacts',[]),1):
-                        item={'turn':n,'filename':filename(candidate['name']),'status':'PENDING'}
-                        manifest['artifacts'].append(item)
-                        dest=folder/f'{n:04}-{index:03}.part'
-                        try:
-                            capture=await self.service.adapter.call('debug_capture',conversation_url=url,page_label=page_label,
-                                user_message_id=turn['user_id'],candidate=candidate,destination=str(dest.resolve()))
-                            if candidate['kind']=='inline_image':
-                                ext={'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp','image/gif':'.gif'}.get(capture.get('mime_type'))
-                                if ext:item['filename']=Path(item['filename']).stem+ext
-                            info=inspect_file(dest,item['filename'],self.service.settings.artifact_max_bytes)
-                            target=folder/f'{n:04}-{index:03}-{item["filename"]}'
-                            os.replace(dest,target);target.chmod(0o600)
-                            archive_path='artifacts/'+target.name;files.append((target,archive_path));item.update(info,status='AVAILABLE',archive_path=archive_path)
-                        except BridgeError as error:
-                            item.update(status='FAILED',error=error.data);dest.unlink(missing_ok=True)
-                    self.db.execute('UPDATE debug_exports SET manifest=?,updated_at=? WHERE id=?',(json.dumps(manifest,ensure_ascii=False),now(),job))
-                partial=any(a['status']!='AVAILABLE' for a in manifest['artifacts']) or any(t.get('state')!='complete' or t.get('unsupported_outputs') or not t.get('render_ready',True) for t in turns)
-                manifest['complete_for_loaded_content']=not partial
-                zip_path=folder/'conversation.zip';temporary=folder/'conversation.zip.part'
-                with zipfile.ZipFile(temporary,'w',compression=zipfile.ZIP_DEFLATED) as archive:
-                    archive.writestr('transcript.md','\n\n'.join(lines))
-                    archive.writestr('transcript.json',json.dumps({'conversation_url':url,'turns':turns},ensure_ascii=False,indent=2))
-                    archive.writestr('manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2))
-                    archive.writestr('README.txt','只读调试导出。文件缺失、未完成或未支持的内容见 manifest.json。\n未读取或导出 Cookie、Session Token、请求认证头。\n未核验服务端历史分页；长对话可能存在未加载历史。\n')
-                    for source,name in files:archive.write(source,name)
-                temporary.chmod(0o600);os.replace(temporary,zip_path)
-                self.db.execute('UPDATE debug_exports SET status=?,manifest=?,updated_at=?,expires_at=? WHERE id=?',('PARTIAL' if partial else 'COMPLETED',json.dumps(manifest,ensure_ascii=False),now(),now()+self.service.settings.export_retention_days*86400,job))
+            self.db.execute("UPDATE debug_exports SET status='RUNNING',updated_at=? WHERE id=?",(now(),job))
+            observed=await self.browser('debug_observe',conversation_url=url)
+            page_label=observed['page_label'];state=observed['state'];turns=state['turns']
+            manifest={'export_id':job,'conversation_url':url,'created_at':now(),'read_only':True,
+                      'history_scope':'rendered_conversation','history_pagination_verified':False,'turn_count':len(turns),
+                      'artifacts':[],'external_images':[],'warnings':['长对话的服务端历史分页尚未验证；归档记录的是本轮已加载的对话内容。']}
+            lines=['# ChatGPT 对话导出',f'\n来源：{url}\n']
+            files=[]
+            for n,turn in enumerate(turns,1):
+                lines.extend([f'## {n}. 用户',turn.get('user_text',''),f'## {n}. ChatGPT',turn.get('assistant_text','')])
+                for link in turn.get('sources',[]):lines.append(f"- {link.get('title','链接')}: {link['url']}")
+                for link in turn.get('external_images',[]):
+                    manifest['external_images'].append({'turn':n,**link})
+                    lines.append(f"- 网页引用图片（仅链接） {link.get('title','图片')}: {link['url']}")
+                if turn.get('state')!='complete':manifest['warnings'].append(f'第 {n} 轮尚未完成生成。')
+                if not turn.get('render_ready',True):manifest['warnings'].append(f'第 {n} 轮的回答正文或图片尚未完成网页渲染，不能确认内容完整。')
+                for gap in turn.get('unsupported_outputs',[]):manifest['warnings'].append(f"第 {n} 轮的 {gap['kind']} 预览尚不支持导出原始文件。")
+                for index,candidate in enumerate(turn.get('artifacts',[]),1):
+                    item={'turn':n,'filename':filename(candidate['name']),'status':'PENDING'}
+                    manifest['artifacts'].append(item)
+                    dest=folder/f'{n:04}-{index:03}.part'
+                    try:
+                        capture=await self.browser('debug_capture',conversation_url=url,page_label=page_label,
+                            user_message_id=turn['user_id'],candidate=candidate,destination=str(dest.resolve()))
+                        if candidate['kind']=='inline_image':
+                            ext={'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp','image/gif':'.gif'}.get(capture.get('mime_type'))
+                            if ext:item['filename']=Path(item['filename']).stem+ext
+                        info=inspect_file(dest,item['filename'],self.service.settings.artifact_max_bytes)
+                        target=folder/f'{n:04}-{index:03}-{item["filename"]}'
+                        os.replace(dest,target);target.chmod(0o600)
+                        archive_path='artifacts/'+target.name;files.append((target,archive_path));item.update(info,status='AVAILABLE',archive_path=archive_path)
+                    except BridgeError as error:
+                        item.update(status='FAILED',error=error.data);dest.unlink(missing_ok=True)
+                self.db.execute('UPDATE debug_exports SET manifest=?,updated_at=? WHERE id=?',(json.dumps(manifest,ensure_ascii=False),now(),job))
+            partial=any(a['status']!='AVAILABLE' for a in manifest['artifacts']) or any(t.get('state')!='complete' or t.get('unsupported_outputs') or not t.get('render_ready',True) for t in turns)
+            manifest['complete_for_loaded_content']=not partial
+            zip_path=folder/'conversation.zip';temporary=folder/'conversation.zip.part'
+            with zipfile.ZipFile(temporary,'w',compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr('transcript.md','\n\n'.join(lines))
+                archive.writestr('transcript.json',json.dumps({'conversation_url':url,'turns':turns},ensure_ascii=False,indent=2))
+                archive.writestr('manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2))
+                archive.writestr('README.txt','只读调试导出。文件缺失、未完成或未支持的内容见 manifest.json。\n未读取或导出 Cookie、Session Token、请求认证头。\n未核验服务端历史分页；长对话可能存在未加载历史。\n')
+                for source,name in files:archive.write(source,name)
+            temporary.chmod(0o600);os.replace(temporary,zip_path)
+            self.db.execute('UPDATE debug_exports SET status=?,manifest=?,updated_at=?,expires_at=? WHERE id=?',('PARTIAL' if partial else 'COMPLETED',json.dumps(manifest,ensure_ascii=False),now(),now()+self.service.settings.export_retention_days*86400,job))
         except asyncio.CancelledError:
             self.db.execute("UPDATE debug_exports SET status='NEEDS_ATTENTION',error=?,updated_at=? WHERE id=?",(json.dumps({'error_code':'EXPORT_INTERRUPTED','message':'导出中断，可重新发起只读导出。'}),now(),job));raise
         except Exception as error:
@@ -126,7 +131,7 @@ class ExportJobs:
             self.db.execute("UPDATE debug_exports SET status='FAILED',error=?,updated_at=? WHERE id=?",(json.dumps(detail),now(),job))
         finally:
             if page_label:
-                with contextlib.suppress(Exception):await self.service.adapter.call('debug_close',conversation_url=url,page_label=page_label)
+                with contextlib.suppress(Exception):await self.browser('debug_close',conversation_url=url,page_label=page_label)
 
     def delete(self,owner,job):
         row=self.get(owner,job)

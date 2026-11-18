@@ -1,3 +1,4 @@
+import time
 from contextlib import asynccontextmanager
 import base64
 import hashlib
@@ -99,6 +100,52 @@ async def test_pkce_code_replay_refresh_rotation_revocation_and_restart(oauth,tm
         r=await public.post('/revoke',data={'client_id':form['client_id'],'token':fresh['refresh_token'],'token_type_hint':'refresh_token'})
         assert r.status_code==200,r.text
         assert await app.state.oauth.load_access_token(fresh['access_token']) is None
+
+async def test_reconcile_needs_write_scope_like_other_browser_actions(oauth):
+    async with oauth as (app,private,public):
+        created=await private.post('/api/create_query',json={'text':'x','request_id':'r1'},headers={'Authorization':'Bearer '+TOKEN})
+        qid=created.json()['query_id']
+        _,form=await grant(private,public,scopes='research:read')
+        read=(await public.post('/token',data=form)).json()
+        # Reconcile drives the server browser exactly like recover_session: a
+        # read-only delegated credential must not be able to trigger it.
+        r=await private.post('/api/reconcile',json={'query_id':qid},headers={'Authorization':'Bearer '+read['access_token']})
+        assert r.status_code==403 and r.json()['error']=='insufficient_scope'
+        _,form=await grant(private,public)
+        write=(await public.post('/token',data=form)).json()
+        r=await private.post('/api/reconcile',json={'query_id':qid},headers={'Authorization':'Bearer '+write['access_token']})
+        assert r.status_code==200 and r.json()['ok']
+
+
+async def test_oauth_objects_are_garbage_collected_but_replay_rows_survive(oauth):
+    from ego_bridge.oauth import hashed
+    async with oauth as (app,private,public):
+        provider=app.state.oauth
+        client,form=await grant(private,public)
+        tokens=(await public.post('/token',data=form)).json()
+        rotated=(await public.post('/token',data={'grant_type':'refresh_token','client_id':client['client_id'],
+            'refresh_token':tokens['refresh_token'],'resource':RESOURCE})).json()
+        live=provider.get('access',hashed(rotated['access_token']))
+        used=provider.get('refresh',hashed(tokens['refresh_token']))
+        assert live and used and used['used']
+        # Seed dead rows: the superseded access token, an orphaned code, and a
+        # grant that expired more than a month ago.
+        row=provider.get('access',hashed(tokens['access_token']));row['expires_at']=0
+        provider.put('access',hashed(tokens['access_token']),row)
+        provider.put('code','orphan-code',dict(client_id='x',scopes=[],expires_at=0,code_challenge='c',redirect_uri='http://127.0.0.1:1/cb'))
+        provider.put('grant','old',dict(owner='alice',fingerprint='x',client_id='c',client_name='Old',scopes=['research:read'],
+            created_at=time.time()-40*86400,expires_at=time.time()-40*86400,revoked=False))
+        assert provider.gc()==3
+        assert provider.get('access',hashed(tokens['access_token'])) is None
+        assert provider.get('code','orphan-code') is None
+        assert provider.get('grant','old') is None
+        # Live tokens and the used refresh row (replay evidence) all survive.
+        assert provider.get('access',hashed(rotated['access_token']))==live
+        assert provider.get('refresh',hashed(tokens['refresh_token'])) is not None
+        assert await provider.load_access_token(rotated['access_token']) is not None
+        report=app.state.service.retention.sweep()
+        assert report['oauth_objects_removed']==0 and 'oauth' not in [e['area'] for e in report['errors']]
+
 
 async def test_consent_csrf_scope_owner_and_revoke(oauth):
     async with oauth as (app,private,public):

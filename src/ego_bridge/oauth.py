@@ -23,7 +23,7 @@ from starlette.routing import Route
 from .auth import BrowserSessions, COOKIE_NAME, HTTP_COOKIE_NAME, SESSION_SECONDS, env_values, token_owner
 
 SCOPES = ['research:read', 'research:write']
-WRITE_TOOLS = {'ask','cancel','create_query','continue_query','recover_session','retry_query','cancel_query','collect_artifacts','delete_query','health_check'}
+WRITE_TOOLS = {'ask','cancel','create_query','continue_query','recover_session','reconcile','retry_query','cancel_query','collect_artifacts','delete_query','health_check'}
 PUBLIC_PATHS = {'/mcp','/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp',
     '/.well-known/oauth-authorization-server','/authorize','/token','/register','/revoke'}
 
@@ -152,6 +152,32 @@ class OAuthProvider:
     async def revoke_token(self, token):
         row = self.get('access' if isinstance(token,AccessToken) else 'refresh',hashed(token.token))
         if row: self.revoke_grant(row['grant'])
+
+    def gc(self, *, at=None):
+        """Delete dead OAuth objects; live tokens are never touched. Used refresh
+        rows survive their full lifetime: deleting them early would turn a replay
+        into a silent unknown token instead of revoking the whole grant."""
+        at = time.time() if at is None else at
+        removed = 0
+        def dead(value):
+            return not isinstance(value, dict) or not isinstance(value.get('expires_at'), (int, float)) or value['expires_at'] <= at - 86400
+        for kind in ('code', 'pending', 'access', 'refresh'):
+            for row in self.db.execute("SELECT key,value FROM oauth_objects WHERE kind=?", (kind,)).fetchall():
+                try: value = json.loads(row[1])
+                except (ValueError, TypeError): value = None
+                if dead(value):
+                    self.delete(kind, row[0]); removed += 1
+        horizon = at - 31 * 86400
+        for row in self.db.execute("SELECT key,value FROM oauth_objects WHERE kind='grant'").fetchall():
+            try: value = json.loads(row[1])
+            except (ValueError, TypeError): value = None
+            expired = value.get('expires_at') if isinstance(value, dict) else None
+            created = value.get('created_at') if isinstance(value, dict) else None
+            if not isinstance(value, dict) \
+                    or (isinstance(expired, (int, float)) and expired <= horizon) \
+                    or (value.get('revoked') and isinstance(created, (int, float)) and created <= horizon):
+                self.delete('grant', row[0]); removed += 1
+        return removed
 
     def grants(self, owner):
         rows = self.db.execute("SELECT key,value FROM oauth_objects WHERE kind='grant'").fetchall()

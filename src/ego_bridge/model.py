@@ -80,6 +80,7 @@ class Settings:
     max_active: int = 2
     completion_confirm_seconds: float = 4
     poll_seconds: float = 4
+    quiet_poll_seconds: float = 20
     soft_timeout: float = 600
     hard_timeout: float = 3600
     browser_timeout: float = 90
@@ -120,6 +121,8 @@ class Settings:
         result = cls(runtime=runtime, **data)
         if not 0 <= result.completion_confirm_seconds <= 60:
             raise ValueError('completion_confirm_seconds must be 0..60')
+        if not 0 < result.quiet_poll_seconds <= 86400:
+            raise ValueError('quiet_poll_seconds must be in (0, 86400]')
         if not 1 <= result.max_active <= 4:
             raise ValueError("max_active must be 1..4")
         if result.oauth_issuer and (not 1 <= result.public_gateway_port <= 65535 or result.public_gateway_port==result.port):
