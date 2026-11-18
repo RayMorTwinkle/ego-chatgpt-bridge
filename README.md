@@ -152,6 +152,8 @@ HTTPS 是可选部署方式：主动设置 `tls_enabled=true` 后运行 `renew-t
 策略可在 `config.json` 调整，修改后重启；现有文件的到期时间固定记录，新采集采用新配置。`diagnose` 返回保留策略和最近清理结果，运行目录 `retention.json` 保存清理回执。`.env`、TLS密钥和对话文字不会因文件轮换而删除。
 
 
+v0.5.5：附件发送就绪等待改为 `page.evaluate` 主动轮询——Ego 的 `waitForFunction` 观察不到已有按钮的 disabled 属性翻转，导致附件永远停在就绪等待；实测上传 3-6 秒即就绪，附件功能首次端到端可用。带附件 prepare 预算提高到 300 秒；`retry_query` 重置自动重试预算（保留历史）。采纳外部架构审查（GPT-6 通读全部源码并以最小 harness 复现）的三项：观察/对账内部异常收敛为 `OBSERVATION_INTERNAL_ERROR`，消除永久 active 活锁与执行名额泄漏；`ask` 自动去重纳入 `context_mode`，不同上下文约束不再错误合并为同一任务；浏览器回施行加每次调用 nonce，防页面脚本伪造回执。
+
 v0.5.4：修复所有附件发送必然失败的问题——附件挂载后的可发送判定改用与实际点击同源的标准（`data-testid` 优先），并等待 ChatGPT 处理新附件期间发送按钮重新可用（最多 60 秒）；失败时 diagnostic_context 附带可见发送按钮与告警证据。此前纯文本正常、附件路径因两套发送按钮标准漂移而全部停在 ATTACHMENT_UPLOAD_INCOMPLETE。
 
 v0.5.3：观察轮询自适应——正文流动时保持 4 秒快节奏，安静页面退到 20 秒（`quiet_poll_seconds` 可调），已安排的自动重试永不因退避迟到；超时根因（每次轮询独立进程）详见 operations.md 的执行成本小节。OAuth：`reconcile` 纳入写权限（与 recover_session 同级的浏览器驱动动作）；access/refresh/code/pending/grant 对象随保留策略每小时回收，已用 refresh 行存活满全期以保住重放撤销语义，撤销记录保留 31 天。调试 ZIP 导出改为逐浏览器调用持锁，不再长时间独占 worker。

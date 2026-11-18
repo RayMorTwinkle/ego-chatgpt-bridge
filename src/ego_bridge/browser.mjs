@@ -570,13 +570,14 @@ async function main() {
   fail('INVALID_ACTION','未知浏览器动作。');
 }
 
-try { console.log('EGO_BRIDGE_JSON:'+JSON.stringify({ok:true,value:await main()})); }
+const receiptLine = value => console.log('EGO_BRIDGE_JSON:'+input.call_nonce+':'+JSON.stringify(value));
+try { receiptLine({ok:true,value:await main()}); }
 catch(error) {
   // Do not print page HTML, credentials, query text, or arbitrary browser error payloads.
   let reason=String(error.message??error.name);
   for(const sensitive of [input.send_text,input.expected_account]) if(sensitive) reason=reason.split(sensitive).join('[redacted]');
   reason=reason.replace(/Bearer\s+\S+/gi,'Bearer [redacted]').replace(/((?:cookie|token|authorization)\s*[:=]\s*)[^\s,;]+/gi,'$1[redacted]').slice(0,1200);
-  console.log('EGO_BRIDGE_JSON:'+JSON.stringify({ok:false,error:{error_code:error.code??'BROWSER_OPERATION_FAILED',
+  receiptLine({ok:false,error:{error_code:error.code??'BROWSER_OPERATION_FAILED',
     message:error.code?error.message:reason,stage:error.stage??input.action,
-    diagnostic_context:{...receipt,...error.diagnostic_context,cause_name:error.name,reason}},receipt}));
+    diagnostic_context:{...receipt,...error.diagnostic_context,cause_name:error.name,reason}},receipt});
 }

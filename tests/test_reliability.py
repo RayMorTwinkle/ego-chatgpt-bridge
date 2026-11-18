@@ -467,6 +467,25 @@ async def test_preparation_failure_safe_retry(rig):
     assert len(fake.sent)==1
 
 
+async def test_internal_observation_error_converges_and_frees_the_slot(rig):
+    s,db,fake=rig
+    a=await create(s)
+    await execute(s,db,a)
+    original=fake.call
+    async def broken(action,**kw):
+        if action=='observe':raise KeyError('schema changed')
+        return await original(action,**kw)
+    fake.call=broken
+    await s.observe(db.operation(a['message_id']))
+    op=db.operation(a['message_id'])
+    assert op['status']=='NEEDS_ATTENTION' and op['error']['error_code']=='OBSERVATION_INTERNAL_ERROR'
+    assert op['error']['diagnostic_context']=={'type':'KeyError'} and not db.active()
+    # The converged task never re-sends; manual reconcile after the bug is fixed works.
+    fake.call=original
+    r=await s.dispatch('alice','recover_session',{'query_id':a['query_id']})
+    assert r['status']=='COMPLETED' and len(fake.sent)==1
+
+
 async def test_manual_retry_restores_the_automatic_budget(rig,monkeypatch):
     s,db,fake=rig;clock=[1000.0]
     monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])

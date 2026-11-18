@@ -101,7 +101,12 @@ class AgentView:
                     ((? IS NULL AND kind='create') OR (? IS NOT NULL AND kind='continue' AND query_id=?)) ORDER BY created_at DESC''',(owner,qid,qid,qid)).fetchall()
                 for row in rows:
                     op=self.store.operation(row[0])
-                    if not (op['payload']['text']==args.get('text') and sorted(a['sha256'] for a in op['payload'].get('attachments',[]))==hashes):
+                    # context_mode changes the actual sent prompt (an isolation
+                    # suffix is appended at submit); different modes are different
+                    # requests and must never collapse into one operation.
+                    if not (op['payload']['text']==args.get('text')
+                            and sorted(a['sha256'] for a in op['payload'].get('attachments',[]))==hashes
+                            and op['payload'].get('context_mode','project')==args.get('context_mode','project')):
                         continue
                     # Reusable: in flight, still being reconciled, or a fresh completed result
                     # the caller is retrying. Terminal dead ends (cancelled, failed, parked)

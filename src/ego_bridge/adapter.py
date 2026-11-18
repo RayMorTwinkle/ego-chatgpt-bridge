@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import hashlib
+import secrets
 import time
 from pathlib import Path
 
@@ -57,7 +58,11 @@ class EgoAdapter:
         s = self.settings
         if not s.expected_account or (not action.startswith('debug_') and not s.project_id):
             raise BridgeError('BROWSER_NOT_CONFIGURED','请在运行目录 config.json 配置真实空间、专案标识和预期账户显示名。',stage=action,action=True,safe=action!='submit')
-        payload = dict(action=action, project_id=s.project_id, project_url=s.project_url,
+        # Ego forwards both our console.log and page console output into the same
+        # channels. A per-call nonce makes the receipt line unforgeable by any
+        # page script or extension that tries to print a lookalike line.
+        nonce = secrets.token_hex(16)
+        payload = dict(action=action, call_nonce=nonce, project_id=s.project_id, project_url=s.project_url,
                        space_id=s.space_id, space_name=s.space_name, expected_account=s.expected_account,
                        force_space_takeover=s.force_space_takeover,recreate_missing_space=s.recreate_missing_space, **arguments)
         script = "const input=" + json.dumps(payload, ensure_ascii=False) + ";\n" + self.script
@@ -82,9 +87,11 @@ class EgoAdapter:
                     raise
                 raise BridgeError("BROWSER_TIMEOUT", "Ego 调用超时；命令可能已经产生页面效果。", stage=action, action=True)
             # Ego currently forwards console.log to stderr. Accept either channel,
-            # and parse only our tagged JSON; never forward raw streams to clients.
+            # and parse only our nonce-tagged JSON; never forward raw streams to
+            # callers/logs. The nonce also fails closed against forged lines.
             output = stdout.decode(errors="replace") + "\n" + stderr.decode(errors="replace")
-            lines = [line[len("EGO_BRIDGE_JSON:"):] for line in output.splitlines() if line.startswith("EGO_BRIDGE_JSON:")]
+            prefix = "EGO_BRIDGE_JSON:" + nonce + ":"
+            lines = [line[len(prefix):] for line in output.splitlines() if line.startswith(prefix)]
             if not lines:
                 # Raw stderr may include URLs or query text: never forward it to callers/logs.
                 raise BridgeError("EGO_CONNECTION_FAILED", "Ego 未返回结构化操作回执。", stage=action, retryable=True,

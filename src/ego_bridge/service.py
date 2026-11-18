@@ -722,6 +722,17 @@ class Service:
                     self.store.transition(op["id"], current["status"] if current["status"] in ACTIVE else "GENERATING", error=error.data)
                     return
             self.store.transition(op["id"], "NEEDS_ATTENTION", error=error.data)
+        except Exception as error:
+            # Internal bugs (schema drift, unexpected shapes) must converge the
+            # operation instead of leaving it permanently active: an ACTIVE op
+            # here is a livelock that leaks a max_active slot and re-raises every
+            # poll. Never requeue: convergence only, with a sanitized receipt.
+            logger.exception("observation failed internally for %s", op["id"])
+            current=self.store.operation(op["id"])
+            status="OUTCOME_UNKNOWN" if current["status"] in {"SUBMITTING","OUTCOME_UNKNOWN"} else "NEEDS_ATTENTION"
+            self.store.transition(op["id"], status, error=BridgeError("OBSERVATION_INTERNAL_ERROR",
+                "观察执行器内部异常，任务已收敛；请查看服务端日志。", stage="observe", action=True,
+                context={"type": type(error).__name__}).data)
 
     async def package_result(self,op,turn,result):
         result.update(delivery_complete=False,delivery_phase='COLLECTING_ARTIFACTS')

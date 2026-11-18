@@ -90,6 +90,20 @@ async def test_dedup_never_returns_dead_ends_and_requeues_failed_pre_send(rig):
     assert len(b.sent)==1 and db.operation(failed['message_id'])['status']=='WAITING_FOR_RESPONSE'
 
 
+async def test_dedup_distinguishes_context_mode(rig):
+    s,db,b=rig
+    project=await ask(s,text='研究 X')
+    isolated=await s.dispatch('alice','ask',{'text':'研究 X','context_mode':'request_only_best_effort'})
+    assert isolated['ok'] and isolated['message_id']!=project['message_id']
+    # Same text and same mode still dedupes; same text and project mode returns the project op.
+    repeat=await s.dispatch('alice','ask',{'text':'研究 X','context_mode':'request_only_best_effort'})
+    assert repeat['message_id']==isolated['message_id']
+    plain=await ask(s,text='研究 X')
+    assert plain['message_id']==project['message_id']
+    payload=db.operation(isolated['message_id'])['payload']
+    assert payload['context_mode']=='request_only_best_effort'
+
+
 async def test_reconcile_tool_reobserves_without_resending(rig):
     s,db,b=rig
     a=await ask(s)
