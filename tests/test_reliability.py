@@ -141,7 +141,7 @@ async def test_cancel_request_survives_intermediate_poll(rig):
     assert db.operation(a['message_id'])['status']=='CANCELLED'
 
 
-@pytest.mark.parametrize('code',['EGO_CONNECTION_FAILED','TAB_MISSING','LOGIN_REQUIRED','PAGE_LOAD_FAILED','CONVERSATION_MISMATCH','UNEXPECTED_DIALOG','UI_CHANGED','MODEL_UNAVAILABLE'])
+@pytest.mark.parametrize('code',['LOGIN_REQUIRED','CONVERSATION_MISMATCH','UNEXPECTED_DIALOG','UI_CHANGED','MODEL_UNAVAILABLE'])
 async def test_observation_failure_can_recover_without_resend(rig,code):
     s,db,fake=rig
     a=await create(s)
@@ -156,6 +156,65 @@ async def test_observation_failure_can_recover_without_resend(rig,code):
     fake.call=original
     r=await s.dispatch('alice','recover_session',{'query_id':a['query_id']})
     assert r['status']=='COMPLETED' and len(fake.sent)==1
+
+
+@pytest.mark.parametrize('code',['EGO_CONNECTION_FAILED','BROWSER_TIMEOUT','BROWSER_OPERATION_FAILED','TAB_MISSING','PAGE_LOAD_FAILED'])
+async def test_transient_observation_failure_auto_retries_instead_of_parking(rig,code):
+    s,db,fake=rig
+    a=await create(s)
+    await execute(s,db,a)
+    original=fake.call
+    async def flaky(action,**kw):
+        if action=='observe':raise BridgeError(code,'injected transient observation failure',stage='observe',action=True)
+        return await original(action,**kw)
+    fake.call=flaky
+    await s.observe(db.operation(a['message_id']))
+    op=db.operation(a['message_id'])
+    # Observation is read-only: a transport hiccup keeps the task in flight.
+    assert op['status']=='WAITING_FOR_RESPONSE' and op['submitted_at'] is not None
+    retry=op['auto_retry']
+    assert retry['kind']=='observe' and retry['attempts']==1 and retry['next_at'] is not None
+    assert not op['error']['user_action_required'] and len(fake.sent)==1
+    fake.call=original
+    r=await s.dispatch('alice','recover_session',{'query_id':a['query_id']})
+    assert r['status']=='COMPLETED' and len(fake.sent)==1
+
+
+async def test_transient_observation_failure_parks_only_after_three_attempts(rig,monkeypatch):
+    s,db,fake=rig;clock=[1000.0]
+    monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
+    a=await create(s)
+    await execute(s,db,a)
+    async def dead(action,**kw):
+        if action=='observe':raise BridgeError('BROWSER_TIMEOUT','injected',stage='observe',action=True)
+        return await fake.call(action,**kw)
+    fake.call=dead
+    for attempt,delay in enumerate((15,60,180),1):
+        await s.observe(db.operation(a['message_id']))
+        op=db.operation(a['message_id'])
+        assert op['status']=='WAITING_FOR_RESPONSE' and op['auto_retry']['attempts']==attempt
+        clock[0]+=delay
+    await s.observe(db.operation(a['message_id']))
+    op=db.operation(a['message_id'])
+    assert op['status']=='NEEDS_ATTENTION' and op['auto_retry']['attempts']==3 and op['auto_retry']['next_at'] is None
+    assert len(fake.sent)==1
+
+
+async def test_legacy_observation_timeout_attention_self_heals(rig,monkeypatch):
+    # Tasks parked by older builds (timeout at observe, message already sent) are
+    # picked up again by the worker instead of waiting for a human forever.
+    s,db,fake=rig;clock=[1000.0]
+    monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
+    a=await create(s)
+    await execute(s,db,a)
+    db.transition(a['message_id'],'NEEDS_ATTENTION',error=BridgeError(
+        'BROWSER_TIMEOUT','Ego 调用超时；命令可能已经产生页面效果。',stage='observe',action=True).data)
+    await s.automatic_recovery()
+    op=db.operation(a['message_id'])
+    assert op['status']=='NEEDS_ATTENTION' and op['auto_retry']['kind']=='observe' and op['auto_retry']['next_at']==clock[0]+15
+    clock[0]+=15
+    await s.automatic_recovery()
+    assert db.operation(a['message_id'])['status']=='COMPLETED' and len(fake.sent)==1
 
 
 @pytest.fixture
@@ -472,7 +531,8 @@ async def test_association_failure_explains_specific_mismatch_and_server_managed
     assert context['expected_user_text_sha256']!=context['observed_user_text_sha256']
     assert context['request_marker_present'] is False
     assert r['execution_context']['browser_location']=='bridge_server'
-    assert r['next_action']['tool']=='recover_session'
+    # The failed association is reconciled automatically; the agent just waits.
+    assert r['next_action']['tool']=='wait_query' and r['next_action']['do_not_resend']
     assert 'Different message' not in str(context)
     assert len(fake.sent)==1
 
@@ -681,7 +741,7 @@ async def test_unknown_automatically_reconciles_once_after_backoff_without_resen
     assert op['auto_retry']['counters']['recover']==1 and op['auto_retry']['next_at'] is None
 
 
-async def test_failed_automatic_reconciliation_is_not_repeated(rig,monkeypatch):
+async def test_failed_automatic_reconciliation_is_bounded(rig,monkeypatch):
     s,db,fake=rig;clock=[1000.0];calls=[]
     monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
     fake.crash_after_send=True
@@ -692,11 +752,11 @@ async def test_failed_automatic_reconciliation_is_not_repeated(rig,monkeypatch):
         calls.append(action);return await original(action,**kw)
     fake.call=track
     clock[0]+=15;await s.automatic_recovery()
-    for _ in range(3):
+    for _ in range(2):
         clock[0]+=180;await s.automatic_recovery()
     op=db.operation(task['message_id'])
     assert op['status']=='OUTCOME_UNKNOWN' and op['auto_retry']['next_at'] is None
-    assert calls==['recover'] and len(fake.sent)==1
+    assert calls==['recover']*3 and len(fake.sent)==1
     await s.execute(op)
     assert len(fake.sent)==1
 

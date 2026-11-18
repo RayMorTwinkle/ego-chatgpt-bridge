@@ -10,6 +10,13 @@ from pathlib import Path
 
 TERMINAL = {"COMPLETED", "FAILED", "NEEDS_ATTENTION", "OUTCOME_UNKNOWN", "CANCELLED"}
 ACTIVE = {"PREPARING", "SUBMITTING", "WAITING_FOR_RESPONSE", "GENERATING"}
+# Observation and reconciliation are read-only: a transport hiccup here can never
+# resend a message, so these codes get bounded automatic retries instead of
+# parking the task on a human. Human-only causes stay out of this set.
+OBSERVE_RETRY = {
+    "BROWSER_OPERATION_FAILED", "BROWSER_TIMEOUT", "EGO_CONNECTION_FAILED",
+    "EGO_PAGE_EVALUATION_TIMED_OUT", "EGO_PAGE_UNRESPONSIVE", "PAGE_LOAD_FAILED", "TAB_MISSING",
+}
 TRANSITIONS = {
     "QUEUED": {"PREPARING", "CANCELLED", "NEEDS_ATTENTION"},
     "PREPARING": {"SUBMITTING", "FAILED", "NEEDS_ATTENTION", "QUEUED"},

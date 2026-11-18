@@ -68,7 +68,10 @@ class EgoAdapter:
             except FileNotFoundError:
                 raise BridgeError("EGO_UNAVAILABLE", "找不到已安装的 ego-browser CLI。", stage=action, action=True, safe=action != "submit")
             try:
-                timeout = max(180, s.browser_timeout) if action == 'prepare' and arguments.get('attachment_paths') else max(150, s.browser_timeout) if action == 'capture_artifact' else s.browser_timeout
+                # Read-only actions can include a page reload and Ego cold start, and a
+                # blind kill mid-submit is the worst outcome to reconcile: give every
+                # action a floor above browser_timeout instead of only capture/prepare.
+                timeout = max(180, s.browser_timeout) if action == 'submit' or (action == 'prepare' and arguments.get('attachment_paths')) else max(150, s.browser_timeout)
                 stdout, stderr = await asyncio.wait_for(process.communicate(script.encode()), timeout)
             except (TimeoutError, asyncio.CancelledError) as exc:
                 process.kill()
@@ -84,10 +87,17 @@ class EgoAdapter:
                 # Raw stderr may include URLs or query text: never forward it to callers/logs.
                 raise BridgeError("EGO_CONNECTION_FAILED", "Ego 未返回结构化操作回执。", stage=action, retryable=True,
                                   action=True, context={"exit_code": process.returncode})
-            result = json.loads(lines[-1])
+            try:
+                result = json.loads(lines[-1])
+            except json.JSONDecodeError:
+                raise BridgeError("EGO_CONNECTION_FAILED", "Ego 返回的操作回执无法解析。", stage=action, retryable=True,
+                                  action=True, context={"exit_code": process.returncode})
+            if not isinstance(result, dict) or "ok" not in result:
+                raise BridgeError("EGO_CONNECTION_FAILED", "Ego 未返回结构化操作回执。", stage=action, retryable=True,
+                                  action=True, context={"exit_code": process.returncode})
             self.accept_space(result.get('value') if result['ok'] else result.get('receipt'))
             if not result["ok"]:
-                error = result["error"]
-                raise BridgeError(error["error_code"], error["message"], stage=error["stage"], action=True,
-                                  context=error.get("diagnostic_context"))
+                error = result.get("error") or {}
+                raise BridgeError(error.get("error_code", "BROWSER_OPERATION_FAILED"), error.get("message", "Ego 操作失败且未提供原因。"),
+                                 stage=error.get("stage", action), action=True, context=error.get("diagnostic_context"))
             return result["value"]

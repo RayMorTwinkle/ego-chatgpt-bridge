@@ -1,4 +1,4 @@
-# 接口与产物交付（v0.5.0）
+# 接口与产物交付（v0.5.2）
 
 MCP `/mcp`、REST `POST /api/<tool>`、WebUI `POST /ui/api/tool/<name>` 共用 Service。MCP/REST 使用调用方 Bearer token，WebUI 使用登录 cookie；身份之间的任务和文件隔离。默认 EasyTier HTTP，TLS 可选。
 
@@ -12,13 +12,14 @@ MCP `/mcp`、REST `POST /api/<tool>`、WebUI `POST /ui/api/tool/<name>` 共用 S
 | list | status=null、limit=20（1..100） | 列出 query_id、title、status、rounds、updated_at |
 | read_artifact | artifact_id；inline_image=true | 小图片直接返回，其余返回 MCP 资源链接 |
 | cancel | query_id；message_id=null | 排队时取消，已开始则尽力停止并等待网页确认 |
+| reconcile | query_id；message_id=null | 手动重跑只读对账，永不重发；自动核对重试用尽后的 needs_you 用它 |
 | diagnose | query_id=null、message_id=null | 仅在 needs_you 且 what_to_do 无法解决时给维护者用 |
 
 `text` 为 1..100000 字符，effort 仅 extra_high/high。wait_seconds 和 timeout_seconds 均为有限数字 0..300。省略 message_id 时固定读取调用开始时的最新轮次，等待不会跳到后来追加的轮次。等待中不返回正文；有 progressToken 时约每 10 秒发送 MCP progress 通知。MCP 使用 SSE 传输通知和最终响应；REST 只在等待结束时返回 JSON。
 
 ### 自动去重
 
-省略 request_id：按身份、输入 query_id（新建为空）、原始文本、附件 SHA-256 的排序集合（保留重复数量）比较。未终止的操作或创建不超过 600 秒的操作直接复用；OUTCOME_UNKNOWN 在超过窗口后也继续复用。附件名、顺序、effort 不参与自动去重。匹配和入队之间不让出执行权，复用持久化操作记录，重启后仍有效。显式 request_id 则沿用原来的永久幂等语义，同键异参冲突；可用新键明确要求相同内容的新请求。
+省略 request_id：按身份、输入 query_id（新建为空）、原始文本、附件 SHA-256 的排序集合（保留重复数量）比较。未终止的操作、仍在对账的 OUTCOME_UNKNOWN，或创建不超过 600 秒的已完成操作直接复用。发送前失败（NEEDS_ATTENTION 且无提交记录）的同内容请求会重新排队原操作，不再返回死任务；已取消、失败或其他终止状态不复用，重新 ask 会创建新操作。附件名、顺序、effort 不参与自动去重。匹配和入队之间不让出执行权，复用持久化操作记录，重启后仍有效。显式 request_id 则沿用原来的永久幂等语义，同键异参冲突；可用新键明确要求相同内容的新请求。
 
 ### 精简结果
 
@@ -32,9 +33,9 @@ MCP `/mcp`、REST `POST /api/<tool>`、WebUI `POST /ui/api/tool/<name>` 共用 S
 
 空 files/sources、非运行时 phase/next、未完成时 answer 均省略。正文为 Markdown。状态为 running/done/needs_you/failed/cancelled；错误或需处理时包含 `problem={code,message,what_to_do}`。参数错误返回 ok=false、status=failed 和 problem；任务状态失败仍可 ok=true，表示状态读取成功。
 
-COMPLETED 且生成与文件完整才映射 done；其余终止但不完整状态映射 needs_you。QUEUED/PREPARING/SUBMITTING/WAITING_FOR_RESPONSE/GENERATING 映射 running。FAILED、CANCELLED 分别映射 failed、cancelled。最终交付不代表内容质量验收。
+COMPLETED 且生成与文件完整才映射 done。QUEUED/PREPARING/SUBMITTING/WAITING_FOR_RESPONSE/GENERATING 映射 running；带待执行自动重试的 OUTCOME_UNKNOWN/NEEDS_ATTENTION 也显示 running（核对中/等待自动重试），其余终止但不完整状态映射 needs_you。FAILED、CANCELLED 分别映射 failed、cancelled。最终交付不代表内容质量验收。
 
-发送结果不确定且有提交记录和基线时，服务端自动 recover_session；已确认生成完成但文件未齐时自动 collect_artifacts。对外分别显示 running/核对中、running/收集文件中。每轮共 3 次、至少间隔 10 秒，次数存入数据库；执行名额满时延后且不消耗次数。失败耗尽后 needs_you，what_to_do 说明自动处理已停止。不支持的输出直接 needs_you。自动路径绝不重新发送。
+发送结果不确定且有提交记录和基线时，服务端自动 recover_session；已确认生成完成但文件未齐时自动 collect_artifacts；观察阶段的瞬时失败（浏览器超时、连接失败、页面加载失败等）同样自动重试，任务保持运行而不停给人。发送前准备失败也自动重试。每类各 3 次，间隔 15/60/180 秒，次数存入数据库；执行名额满时延后且不消耗次数。失败耗尽后 needs_you，what_to_do 说明自动处理已停止，可用 reconcile 或 WebUI「核对网页」再次只读对账。登录失效、人工改动消息等只有人能处理的原因不自动重试。自动路径绝不重新发送。
 
 MCP 普通工具结果只含 structuredContent 和一个 TextContent：未完成为紧凑 JSON；done 时文本为 Markdown 正文，末尾附 query_id、轮次、文件 artifact_id 和来源，纯文本客户端也能追问和取文件。消费者选一个通道读取。read_artifact 保持原有图片/资源协议，diagnose 保留完整诊断。
 

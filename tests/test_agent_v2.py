@@ -69,6 +69,42 @@ async def test_dedup_age_active_and_explicit_key(rig):
     assert conflict['problem']['code']=='IDEMPOTENCY_CONFLICT'
 
 
+async def test_dedup_never_returns_dead_ends_and_requeues_failed_pre_send(rig):
+    s,db,b=rig
+    # A cancelled task is a dead end: asking the same text again must start fresh.
+    a=await ask(s)
+    await s.dispatch('alice','cancel',{'query_id':a['query_id']})
+    again=await ask(s)
+    assert again['message_id']!=a['message_id'] and len(db.candidates())==1
+    # Same text after a pre-send failure requeues that attempt instead of
+    # returning a task the v2 catalog cannot retry.
+    b.fail_prepare=True
+    failed=await ask(s,text='retry me')
+    await s.execute(db.operation(failed['message_id']))
+    assert db.operation(failed['message_id'])['status']=='NEEDS_ATTENTION' and not b.sent
+    b.fail_prepare=False
+    recovered=await ask(s,text='retry me')
+    assert recovered['message_id']==failed['message_id']
+    assert db.operation(failed['message_id'])['status']=='QUEUED' and db.operation(failed['message_id'])['error'] is None
+    await s.execute(db.operation(failed['message_id']))
+    assert len(b.sent)==1 and db.operation(failed['message_id'])['status']=='WAITING_FOR_RESPONSE'
+
+
+async def test_reconcile_tool_reobserves_without_resending(rig):
+    s,db,b=rig
+    a=await ask(s)
+    b.complete=False
+    await s.execute(db.operation(a['message_id']))
+    first=await s.dispatch('alice','reconcile',{'query_id':a['query_id']})
+    assert first['status']=='running' and len(b.sent)==1
+    b.pages['p1'][0].update(state='complete',assistant_text='reconciled answer')
+    second=await s.dispatch('alice','reconcile',{'query_id':a['query_id']})
+    assert second['status']=='done' and second['answer']=='reconciled answer'
+    assert len(b.sent)==1
+    denied=await s.dispatch('bob','reconcile',{'query_id':a['query_id']})
+    assert denied['problem']['code']=='QUERY_NOT_FOUND'
+
+
 async def test_compact_result_markdown_thread_and_verbose(rig):
     s,db,b=rig
     a=await ask(s)
@@ -178,9 +214,13 @@ async def test_auto_recover_never_resends_and_bounded_budget(rig,monkeypatch):
     b.pages['p2'].append(dict(b.pages['p2'][0]))
     await s.automatic_recovery();clock[0]+=15;await s.automatic_recovery()
     value=await s.dispatch('alice','get',{'query_id':bad['query_id']})
+    assert value['status']=='running' and value['phase']=='核对中'
+    clock[0]+=60;await s.automatic_recovery()
+    clock[0]+=180;await s.automatic_recovery()
+    value=await s.dispatch('alice','get',{'query_id':bad['query_id']})
     assert value['status']=='needs_you' and '服务端不会重发' in value['problem']['what_to_do']
     retry=db.operation(bad['message_id'])['auto_retry']
-    assert retry['attempts']==retry['max']==1 and retry['next_at'] is None
+    assert retry['attempts']==retry['max']==3 and retry['next_at'] is None
     fresh=Service(s.settings,db,b);await fresh.automatic_recovery()
     assert db.operation(bad['message_id'])['auto_retry']==retry and len(b.sent)==2
     assert not db.db.execute("SELECT name FROM sqlite_master WHERE name='agent_recovery'").fetchall()
@@ -231,7 +271,7 @@ async def test_default_and_legacy_mcp_catalog_and_single_text_channel(tmp_path,l
                 async with ClientSession(read,write) as session:
                     init=await session.initialize();assert init.instructions.count('。')<=5
                     catalog={t.name:t for t in (await session.list_tools()).tools}
-                    expected={'ask','wait','get','list','read_artifact','cancel','diagnose'}
+                    expected={'ask','wait','get','list','reconcile','read_artifact','cancel','diagnose'}
                     assert expected<=catalog.keys() if legacy else expected==catalog.keys()
                     assert ('create_query' in catalog)==legacy
                     assert catalog['ask'].annotations.readOnlyHint is False
@@ -300,11 +340,14 @@ async def test_failure_states_and_recovery_refuses_unsent_operations(rig):
     ('PREPARING',None,'running','发送中'),
     ('SUBMITTING',None,'running','发送中'),
     ('WAITING_FOR_RESPONSE',None,'running','思考中'),
+    ('WAITING_FOR_RESPONSE',{'kind':'observe','next_at':1000},'running','等待自动重试'),
     ('GENERATING',None,'running','生成中'),
+    ('GENERATING',{'kind':'observe','next_at':1000},'running','等待自动重试'),
     ('OUTCOME_UNKNOWN',{'kind':'recover','next_at':0},'running','核对中'),
     ('OUTCOME_UNKNOWN',{'kind':'recover','next_at':None},'needs_you',None),
     ('OUTCOME_UNKNOWN',{'kind':'artifact','next_at':1000},'needs_you',None),
     ('NEEDS_ATTENTION',{'kind':'artifact','next_at':1000},'needs_you',None),
+    ('NEEDS_ATTENTION',{'kind':'observe','next_at':1000},'running','等待自动重试'),
     ('CANCELLED',None,'cancelled',None),
     ('FAILED',None,'failed',None),
 ])

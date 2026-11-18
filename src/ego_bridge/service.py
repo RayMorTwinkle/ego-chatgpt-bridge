@@ -11,10 +11,15 @@ from pathlib import Path
 from uuid import uuid4
 from urllib.parse import urlparse
 
-from .model import ACTIVE, TERMINAL, BridgeError, Settings, now, provisional_conversation
+import logging
+
+from .model import ACTIVE, OBSERVE_RETRY, TERMINAL, BridgeError, Settings, now, provisional_conversation
 from .store import Store
 from .artifacts import Artifacts
 from .uploads import decode_uploads
+
+
+logger = logging.getLogger("ego_bridge.worker")
 
 
 LONG_RESEARCH_GUIDANCE = (
@@ -118,11 +123,15 @@ class Service:
             if changed or asyncio.get_running_loop().time()>=deadline or value['status'] in TERMINAL:
                 if not changed:value.pop('result',None)
                 return {**value,'changed':changed,'snapshot_mode':'replace','timed_out':not changed and value['status'] not in TERMINAL}
-            await asyncio.sleep(min(.25,max(0,deadline-asyncio.get_running_loop().time())))
+            await asyncio.sleep(min(1.0,max(0,deadline-asyncio.get_running_loop().time())))
 
     def next_action(self,op):
         args={'query_id':op['query_id'],'message_id':op['id']}
         state=op['status'];error=op.get('error') or {}
+        retry=op.get('auto_retry') or {}
+        if retry.get('next_at') is not None:
+            return {'tool':'wait_query','arguments':{**args,'timeout_seconds':25},'wait_seconds':0,'do_not_resend':True,
+                'note':'服务端正按退避自动重试（只读核对、补收文件或重新准备），不会重发消息；保留原 ID 继续等待即可。'}
         if state in {'QUEUED','PREPARING','SUBMITTING','WAITING_FOR_RESPONSE','GENERATING'}:
             return {'tool':'wait_query','arguments':{**args,'timeout_seconds':25},'wait_seconds':0,'do_not_resend':True,
                 'note':'任務可能超過 10 分鐘。單次等待逾時或暫無正文時，保留原 ID 繼續等待，請勿重送。只有 complete=true 表示最終交付。若連接器尚無 wait_query，請用 get_query_result 查詢同一任務。'}
@@ -373,7 +382,7 @@ class Service:
         retry=dict(op.get('auto_retry') or {})
         counters=dict(retry.get('counters') or {})
         attempts=counters.get(kind,0)
-        maximum=1 if kind=='recover' else 3
+        maximum=3
         retry['history']=[*retry.get('history',[]),{'at':now(),'kind':kind,'attempt':attempts,'error':dict(error)}]
         if attempts>=maximum:
             self.store.patch(op['id'],auto_retry=retry)
@@ -398,27 +407,45 @@ class Service:
             if len(self.store.active())>=self.settings.max_active:continue
             # Consume before the read-only call, including across process restarts.
             self.clear_retry_due(op)
-            await self.observe(self.store.operation(op['id']),recover=True)
+            async with self.control:
+                await self.observe(self.store.operation(op['id']),recover=True)
+        # Legacy/no-retry observation timeouts parked tasks here even though the
+        # message was already sent and reconciling is read-only. Heal them the
+        # same way; human-only causes are excluded via OBSERVE_RETRY.
+        for row in self.store.db.execute("SELECT id FROM operations WHERE status='NEEDS_ATTENTION'").fetchall():
+            op=self.store.operation(row[0]);error=op.get('error') or {}
+            if error.get('error_code') not in OBSERVE_RETRY or op['submitted_at'] is None:continue
+            retry=op.get('auto_retry') or {}
+            if not retry.get('counters',{}).get('observe'):
+                self.schedule_retry(op,error,'observe')
+                continue
+            if retry.get('kind')!='observe' or retry.get('next_at') is None or retry['next_at']>now():continue
+            if len(self.store.active())>=self.settings.max_active:continue
+            self.clear_retry_due(op)
+            async with self.control:
+                await self.observe(self.store.operation(op['id']),recover=True)
 
     async def run(self):
         while True:
             try:
-                async with self.control:
-                    # Polling only reads known pages. A failed observation never triggers a send.
-                    for op in self.store.active():
-                        if op["status"] in {"WAITING_FOR_RESPONSE", "GENERATING"}:
-                            if self.retry_due(op):
-                                self.clear_retry_due(op)
-                                await self.observe(self.store.operation(op["id"]))
-                    await self.automatic_recovery()
-                    occupied = len(self.store.active())
-                    for op in [o for o in self.store.candidates() if self.retry_due(o)][:max(0, self.settings.max_active - occupied)]:
+                # Polling only reads known pages. A failed observation never triggers a send.
+                # Control is held per operation so API-side recovery stays responsive.
+                for op in self.store.active():
+                    if op["status"] in {"WAITING_FOR_RESPONSE", "GENERATING"} and self.retry_due(op):
+                        async with self.control:
+                            self.clear_retry_due(op)
+                            await self.observe(self.store.operation(op["id"]))
+                await self.automatic_recovery()
+                occupied = len(self.store.active())
+                for op in [o for o in self.store.candidates() if self.retry_due(o)][:max(0, self.settings.max_active - occupied)]:
+                    async with self.control:
                         await self.execute(op)
                 self.last_worker_error = None
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 self.last_worker_error = {"error_code": "WORKER_FAILED", "type": type(error).__name__}
+                logger.exception("worker iteration failed")
             self.wake.clear()
             try:
                 await asyncio.wait_for(self.wake.wait(), self.settings.poll_seconds)
@@ -624,11 +651,31 @@ class Service:
                 cancel_error=op["error"] if op["error"] and op["error"].get("error_code")=="CANCEL_REQUESTED" else None
                 self.store.transition(op["id"], target, result=result, error=cancel_error)
         except BridgeError as error:
-            unknown = error.data["error_code"] in {"SEND_OUTCOME_UNKNOWN", "MESSAGE_ASSOCIATION_FAILED", "HISTORY_CHANGED"}
-            artifact_retry=(op.get('auto_retry') or {}).get('kind')=='artifact' and error.data['error_code'] in PRE_SEND_RETRY
-            retrying=artifact_retry and self.schedule_retry(self.store.operation(op['id']),error.data,'artifact')
-            self.store.transition(op["id"], "OUTCOME_UNKNOWN" if unknown else "GENERATING" if retrying else "NEEDS_ATTENTION", error=error.data)
-            if unknown:self.schedule_retry(self.store.operation(op['id']),error.data,'recover')
+            code=error.data["error_code"]
+            current=self.store.operation(op["id"])
+            if code in {"SEND_OUTCOME_UNKNOWN", "MESSAGE_ASSOCIATION_FAILED", "HISTORY_CHANGED"}:
+                self.store.transition(op["id"], "OUTCOME_UNKNOWN", error=error.data)
+                self.schedule_retry(self.store.operation(op["id"]), error.data, "recover")
+                return
+            artifact_retry=(op.get('auto_retry') or {}).get('kind')=='artifact' and code in PRE_SEND_RETRY
+            if artifact_retry and self.schedule_retry(self.store.operation(op["id"]),error.data,'artifact'):
+                error.data['user_action_required']=False
+                self.store.transition(op["id"], "GENERATING", error=error.data)
+                return
+            if code in OBSERVE_RETRY:
+                if current["status"]=="OUTCOME_UNKNOWN":
+                    # Already across the send boundary: keep reconciling with bounded backoff.
+                    self.store.transition(op["id"], "OUTCOME_UNKNOWN", error=error.data)
+                    self.schedule_retry(self.store.operation(op["id"]), error.data, "recover")
+                    return
+                if self.schedule_retry(self.store.operation(op["id"]), error.data, "observe"):
+                    # Observation is read-only and never resends: a transport hiccup
+                    # keeps the task in flight with backoff instead of parking it
+                    # on a human; only exhausted retries become NEEDS_ATTENTION.
+                    error.data["user_action_required"]=False
+                    self.store.transition(op["id"], current["status"] if current["status"] in ACTIVE else "GENERATING", error=error.data)
+                    return
+            self.store.transition(op["id"], "NEEDS_ATTENTION", error=error.data)
 
     async def package_result(self,op,turn,result):
         result.update(delivery_complete=False,delivery_phase='COLLECTING_ARTIFACTS')

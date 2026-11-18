@@ -9,7 +9,7 @@ from pydantic import Field
 
 INSTRUCTIONS = ('用 ask 新建研究或在原 query_id 追问。'
     '用 wait 等到完成，仍在运行时按 next 继续等待，研究可能超过 10 分钟。'
-    '服务端自动核对会话和收集文件，needs_you 时按 what_to_do 处理。'
+    '服务端自动核对、重试和收集文件；needs_you 时按 what_to_do 处理，必要时用 reconcile 重新核对（只读，不重发）。'
     '用 read_artifact 读取文件；回答质量和来源请自行核验。')
 
 
@@ -58,3 +58,7 @@ def register(mcp, dispatch, attachments_type):
     @mcp.tool(structured_output=False,description='取消排队任务，或尽力停止已开始的回答。')
     async def cancel(query_id: str, ctx: Context, message_id: str | None = None) -> types.CallToolResult:
         return await call(ctx,'cancel',dict(query_id=query_id,message_id=message_id))
+
+    @mcp.tool(structured_output=False,description='重新核对已提交的消息；只读、永不重发。自动核对重试用尽后的 needs_you 用它。')
+    async def reconcile(query_id: str, ctx: Context, message_id: str | None = None) -> types.CallToolResult:
+        return await call(ctx,'reconcile',dict(query_id=query_id,message_id=message_id))

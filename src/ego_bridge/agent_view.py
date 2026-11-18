@@ -6,14 +6,14 @@ import json
 import math
 from uuid import uuid4
 
-from .model import BridgeError, TERMINAL, now
+from .model import BridgeError, OBSERVE_RETRY, TERMINAL, now
 from .uploads import decode_uploads
 
 
 PROGRESS_SECONDS = 10
 POLL_SECONDS = 1.0
 
-TOOLS = {'ask','wait','get','list','cancel','get_thread'}
+TOOLS = {'ask','wait','get','list','cancel','get_thread','reconcile'}
 PHASES = {'QUEUED':'排队中','PREPARING':'发送中','SUBMITTING':'发送中',
           'WAITING_FOR_RESPONSE':'思考中','GENERATING':'生成中','OUTCOME_UNKNOWN':'核对中'}
 
@@ -40,7 +40,9 @@ class AgentView:
             compact=False,include_outputs=False,content_format='markdown'))
         result=value.get('result') or {}; state=op['status']
         retry=value.get('auto_retry') or {}
-        recovering=state=='OUTCOME_UNKNOWN' and retry.get('kind')=='recover' and retry.get('next_at') is not None
+        pending=retry.get('next_at') is not None
+        recovering=pending and ((state=='OUTCOME_UNKNOWN' and retry.get('kind')=='recover')
+            or (state=='NEEDS_ATTENTION' and retry.get('kind')=='observe'))
         status=('done' if value['complete'] else 'cancelled' if state=='CANCELLED' else 'failed' if state=='FAILED'
                 else 'running' if state not in TERMINAL or recovering else 'needs_you')
         output=dict(ok=True,query_id=op['query_id'],message_id=op['id'],round=op['sequence'],status=status,
@@ -48,7 +50,7 @@ class AgentView:
             answer_characters=len(result.get('content') or ''))
         if status=='running':
             output['phase']=('收集文件中' if state=='GENERATING' and result.get('completeness_signal')=='complete' and not value['delivery_complete']
-                else '等待自动重试' if state=='QUEUED' and retry.get('next_at') is not None else PHASES.get(state,'核对中'))
+                else '等待自动重试' if pending and state!='OUTCOME_UNKNOWN' else PHASES.get(state,'核对中'))
             output['next']={'tool':'wait','arguments':{'query_id':op['query_id'],'message_id':op['id'],'timeout_seconds':50}}
         if status=='done' or partial:output['answer']=result.get('content') or ''
         if partial:output['partial']=bool(value['result_is_partial'])
@@ -62,9 +64,11 @@ class AgentView:
             error=value.get('last_error') or {}
             code=error.get('error_code','INCOMPLETE_RESULT');attempts=retry.get('attempts',0)
             action=(f'回答已生成，文件补收 {attempts} 次失败；可在 WebUI 重新收集文件。' if code.startswith('ARTIFACT_')
+                    else '需要在服务端完成登录或验证。' if code in {'LOGIN_REQUIRED','VERIFICATION_REQUIRED'}
+                    else f'服务端已自动核对 {attempts} 次仍失败；可调用 reconcile 重新核对，或在 WebUI 点「核对网页」；不会重发消息。'
+                    if op['submitted_at'] is not None and code in OBSERVE_RETRY
                     else f'服务端已自动重试 {attempts} 次仍失败；修好浏览器/登录问题后可在 WebUI 点重试，或调用旧接口 retry_query。'
                     if error.get('safe_to_retry') and attempts>=retry.get('max',3) and retry.get('next_at') is None
-                    else '需要在服务端完成登录或验证。' if code in {'LOGIN_REQUIRED','VERIFICATION_REQUIRED'}
                     else '请把 query_id 交给维护者，服务端不会重发。')
             output['problem']={'code':code,'message':error.get('message','结果尚未完整交付。'),'what_to_do':action}
         if thread:
@@ -97,8 +101,19 @@ class AgentView:
                     ((? IS NULL AND kind='create') OR (? IS NOT NULL AND kind='continue' AND query_id=?)) ORDER BY created_at DESC''',(owner,qid,qid,qid)).fetchall()
                 for row in rows:
                     op=self.store.operation(row[0])
-                    if (op['payload']['text']==args.get('text') and sorted(a['sha256'] for a in op['payload'].get('attachments',[]))==hashes
-                            and (op['status'] not in TERMINAL or op['status']=='OUTCOME_UNKNOWN' or now()-op['created_at']<=600)):
+                    if not (op['payload']['text']==args.get('text') and sorted(a['sha256'] for a in op['payload'].get('attachments',[]))==hashes):
+                        continue
+                    # Reusable: in flight, still being reconciled, or a fresh completed result
+                    # the caller is retrying. Terminal dead ends (cancelled, failed, parked)
+                    # are NOT reused — asking again must make progress, not return a corpse.
+                    if op['status'] not in TERMINAL or op['status']=='OUTCOME_UNKNOWN' or (op['status']=='COMPLETED' and now()-op['created_at']<=600):
+                        return await self.dispatch(owner,'wait',dict(query_id=op['query_id'],message_id=op['id'],timeout_seconds=timeout),progress)
+                    if op['status']=='NEEDS_ATTENTION' and op['submitted_at'] is None:
+                        # Same content re-asked after a pre-send failure: requeue that
+                        # attempt instead of creating a duplicate or a dead end.
+                        self.service.clear_retry_due(op)
+                        self.store.transition(op['id'],'QUEUED')
+                        self.service.wake.set()
                         return await self.dispatch(owner,'wait',dict(query_id=op['query_id'],message_id=op['id'],timeout_seconds=timeout),progress)
                 request='auto_'+uuid4().hex
             value=await self.service._dispatch(owner,'continue_query' if qid else 'create_query',{**args,'request_id':request})
@@ -118,6 +133,11 @@ class AgentView:
                     if len(queries)==limit:break
             return {'ok':True,'queries':queries}
         op=self.operation(owner,args)
+        if tool=='reconcile':
+            # Manual re-run of the same read-only reconciliation the worker performs;
+            # it can never resend. Useful when automatic retries are exhausted.
+            await self.service._dispatch(owner,'recover_session',dict(query_id=op['query_id'],message_id=op['id']))
+            return await self.snapshot(owner,self.store.operation(op['id']))
         if tool=='get_thread':
             q=self.store.query(owner,op['query_id']);messages=[]
             for row in self.store.db.execute('SELECT id FROM operations WHERE query_id=? ORDER BY sequence',(q['id'],)).fetchall():

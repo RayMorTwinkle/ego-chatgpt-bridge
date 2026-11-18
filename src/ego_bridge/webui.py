@@ -25,7 +25,7 @@ def ui_routes(service,clients,sessions=None):
     # Versioned asset URLs: a deploy changes the hash, so browsers never pair new HTML with cached old scripts.
     asset_version=hashlib.sha256(b''.join((static/name).read_bytes() for name in ('app.js','md.js','style.css'))).hexdigest()[:12]
     page=(static/'index.html').read_text().replace('{{asset_version}}',asset_version)
-    allowed={'ask','wait','get','list','cancel','get_thread','wait_query','read_artifact','create_query','continue_query','get_query_status','get_query_result','list_queries','health_check','diagnose','recover_session','retry_query','cancel_query','list_messages','get_conversation_info','delete_query','list_artifacts','collect_artifacts','get_artifact'}
+    allowed={'ask','wait','get','list','cancel','reconcile','get_thread','wait_query','read_artifact','create_query','continue_query','get_query_status','get_query_result','list_queries','health_check','diagnose','recover_session','retry_query','cancel_query','list_messages','get_conversation_info','delete_query','list_artifacts','collect_artifacts','get_artifact'}
 
     def response(data,status=200):return JSONResponse(data,status_code=status,headers={'Cache-Control':'no-store'})
 
