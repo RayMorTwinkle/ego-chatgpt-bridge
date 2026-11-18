@@ -123,9 +123,13 @@ async function uploadAttachments(page, paths, names) {
     fail('ATTACHMENT_UPLOAD_FAILED','网页上传失败或未及时显示附件；未发送。请检查网页草稿。','prepare');
   }
   // ChatGPT keeps send disabled while it processes a newly added attachment.
-  // Wait for the same readiness the submit click needs before failing, so a
-  // slow scan window does not abort a healthy upload.
-  await page.waitForFunction(sendReady,undefined,{timeout:60000}).catch(()=>{});
+  // Live probing showed the flip is an attribute change on an existing button,
+  // which waitForFunction does not observe: poll it directly instead.
+  const deadline=Date.now()+120000;
+  while(Date.now()<deadline){
+    if(await page.evaluate(sendReady).catch(()=>false))break;
+    await new Promise(resolve=>setTimeout(resolve,2000));
+  }
   checkAttachments(await state(page),names,'prepare');
 }
 

@@ -347,6 +347,10 @@ class Service:
             if op["status"] != "NEEDS_ATTENTION" or op["submitted_at"] is not None:
                 raise BridgeError("UNSAFE_RETRY", "只允许尚未进入发送边界的人工修复任务重试；已发送或结果不确定不能重发。", action=True)
             self.clear_retry_due(op)
+            # A manual retry after a fix deserves a fresh automatic budget; the
+            # old counters may be exhausted from before the fix. Keep the history.
+            retry = op.get('auto_retry') or {}
+            self.store.patch(op["id"], auto_retry={**retry, 'counters': {}, 'attempts': 0, 'next_at': None})
             self.store.transition(op["id"], "QUEUED")
             self.wake.set()
             return {"ok": True, **self.view(self.store.operation(op["id"]))}

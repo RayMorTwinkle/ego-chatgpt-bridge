@@ -71,7 +71,9 @@ class EgoAdapter:
                 # Read-only actions can include a page reload and Ego cold start, and a
                 # blind kill mid-submit is the worst outcome to reconcile: give every
                 # action a floor above browser_timeout instead of only capture/prepare.
-                timeout = max(180, s.browser_timeout) if action == 'submit' or (action == 'prepare' and arguments.get('attachment_paths')) else max(150, s.browser_timeout)
+                # Attachment prepares add upload plus a send-readiness window on top.
+                timeout = max(300, s.browser_timeout) if action == 'prepare' and arguments.get('attachment_paths') \
+                    else max(180, s.browser_timeout) if action == 'submit' else max(150, s.browser_timeout)
                 stdout, stderr = await asyncio.wait_for(process.communicate(script.encode()), timeout)
             except (TimeoutError, asyncio.CancelledError) as exc:
                 process.kill()

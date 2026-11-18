@@ -467,6 +467,34 @@ async def test_preparation_failure_safe_retry(rig):
     assert len(fake.sent)==1
 
 
+async def test_manual_retry_restores_the_automatic_budget(rig,monkeypatch):
+    s,db,fake=rig;clock=[1000.0]
+    monkeypatch.setattr('ego_bridge.service.now',lambda:clock[0])
+    original=fake.call
+    async def broken(action,**kw):
+        if action=='prepare':raise BridgeError('PAGE_LOAD_FAILED','injected',stage='prepare',action=True)
+        return await original(action,**kw)
+    fake.call=broken
+    a=await create(s)
+    for attempt,delay in enumerate((15,60,180),1):
+        await execute(s,db,a)
+        op=db.operation(a['message_id'])
+        assert op['status']=='QUEUED' and op['auto_retry']['attempts']==attempt
+        clock[0]+=delay
+    await execute(s,db,a)  # fourth failure exhausts the automatic budget
+    op=db.operation(a['message_id'])
+    assert op['status']=='NEEDS_ATTENTION' and op['auto_retry']['attempts']==3
+    r=await s.dispatch('alice','retry_query',{'query_id':a['query_id']})
+    assert r['status']=='QUEUED'
+    # The next failure after a manual retry gets a full fresh budget again.
+    await execute(s,db,a)
+    op=db.operation(a['message_id'])
+    assert op['status']=='QUEUED' and op['auto_retry']['attempts']==1 and len(op['auto_retry']['history'])==5
+    fake.call=original;clock[0]+=15
+    await execute(s,db,a)
+    assert len(fake.sent)==1
+
+
 async def test_temporary_route_waits_for_server_identity_and_legacy_route_can_recover(rig):
     s,db,fake=rig
     task=await create(s);await execute(s,db,task)
