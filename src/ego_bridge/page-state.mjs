@@ -184,7 +184,7 @@ export function readChatPage() {
     model_label:['button[data-testid="model-switcher-dropdown-button"]','button[data-testid="model-selector"]','form button[aria-haspopup="menu"]:has([data-model-name])',
       'button[aria-label="選取 ChatGPT 模型"]','button[aria-label="选择 ChatGPT 模型"]','button[aria-label="Select ChatGPT model"]','button[aria-label="Choose model"]']
       .map(selector=>Array.from(document.querySelectorAll(selector)).filter(visible)).find(matches=>matches.length===1)?.[0]?.innerText,
-    buttons:Array.from(document.querySelectorAll('form button')).filter(visible).map(b=>({label:b.getAttribute('aria-label'),disabled:b.disabled})),
+    buttons:Array.from(document.querySelectorAll('form button')).filter(visible).map(b=>({label:b.getAttribute('aria-label'),testid:b.getAttribute('data-testid'),disabled:b.disabled})),
     dialogs:Array.from(document.querySelectorAll('[role="dialog"],[role="alertdialog"]')).filter(e=>visible(e)&&!(
       e.matches('[role="dialog"][data-slot="popover-content"]:not([aria-modal="true"])')&&
       e.querySelector('[data-summary-panel-variant="dynamic-isle"]')

@@ -34,6 +34,13 @@ async function control(page, kind) {
 }
 const EDITOR = 'loc=css:form [contenteditable="true"]';
 const FILE_INPUT = 'loc=css:form input[type=file][multiple]:is(:not([accept]),[accept=""])';
+// One readiness rule for the send button everywhere. The submit click locates it
+// via findControl (data-testid first, then aria-labels); attachment checks must
+// not use a divergent standard or attachments fail on pages where sending text
+// still works.
+const SEND_LABEL=/^(傳送|发送|Send prompt|Send message|傳送訊息|发送消息|Send)$/;
+const sendReady=()=>Array.from(document.querySelectorAll('form button')).some(e=>
+  e.getClientRects().length&&!e.disabled&&(e.getAttribute('data-testid')==='send-button'||SEND_LABEL.test(e.getAttribute('aria-label')||'')));
 const norm = s => String(s ?? '').replace(/\s+/g, ' ').trim();
 const fail = (code, message, stage='browser',context={}) => { const e=new Error(message); e.code=code; e.stage=stage; e.diagnostic_context=context; throw e; };
 const identity = url => {
@@ -94,9 +101,13 @@ async function state(page) {
 function checkAttachments(s, names, stage) {
   const same=JSON.stringify([...s.draft_attachments].sort())===JSON.stringify([...names].sort());
   if(!same||s.draft_uploading) fail('DRAFT_ATTACHMENT_MISMATCH','草稿附件与本轮请求不一致或尚未完成上传；未发送。',stage);
-  if(names.length && (s.alerts.some(text=>/上[傳传]失[敗败]|upload failed|failed to upload/i.test(text)) ||
-      !s.buttons.some(b=>/^(傳送|发送|Send prompt|Send message)$/.test(b.label??'')&&!b.disabled)))
-    fail('ATTACHMENT_UPLOAD_INCOMPLETE','网页未确认附件可发送；未发送。',stage);
+  if(!names.length) return;
+  const uploadFailed=s.alerts.some(text=>/上[傳传]失[敗败]|upload failed|failed to upload/i.test(text));
+  const ready=s.buttons.some(b=>!b.disabled&&(b.testid==='send-button'||SEND_LABEL.test(b.label??'')));
+  if(uploadFailed||!ready)
+    // Button labels and alert texts are page chrome, never prompt text or credentials.
+    fail('ATTACHMENT_UPLOAD_INCOMPLETE','网页未确认附件可发送；未发送。',stage,
+      {send_buttons:s.buttons.filter(b=>b.label||b.testid).slice(0,8),alerts:s.alerts.map(text=>text.slice(0,200))});
 }
 
 async function uploadAttachments(page, paths, names) {
@@ -111,6 +122,10 @@ async function uploadAttachments(page, paths, names) {
   } catch(error) {
     fail('ATTACHMENT_UPLOAD_FAILED','网页上传失败或未及时显示附件；未发送。请检查网页草稿。','prepare');
   }
+  // ChatGPT keeps send disabled while it processes a newly added attachment.
+  // Wait for the same readiness the submit click needs before failing, so a
+  // slow scan window does not abort a healthy upload.
+  await page.waitForFunction(sendReady,undefined,{timeout:60000}).catch(()=>{});
   checkAttachments(await state(page),names,'prepare');
 }
 
