@@ -1,0 +1,42 @@
+{
+ "kind": "project",
+ "url": "https://chatgpt.com/g/g-p-6aeb2a2310d88191bfd9c488bfc7f58f/project",
+ "note": "sanitized from a live capture; structure and flags are real",
+ "state": {
+  "url": "https://chatgpt.com/g/g-p-6aeb2a2310d88191bfd9c488bfc7f58f/project",
+  "title": "Sanitized canary fixture",
+  "turns": [],
+  "editor_present": true,
+  "draft": "",
+  "draft_has_autolinks": false,
+  "draft_attachments": [],
+  "draft_uploading": false,
+  "model_label": "推理強度\n極高",
+  "buttons": [
+   {
+    "label": "新增檔案和更多內容",
+    "testid": null,
+    "disabled": false
+   },
+   {
+    "label": "選取 ChatGPT 模型",
+    "testid": null,
+    "disabled": false
+   },
+   {
+    "label": "聽寫",
+    "testid": null,
+    "disabled": false
+   },
+   {
+    "label": "開始語音對話",
+    "testid": null,
+    "disabled": false
+   }
+  ],
+  "dialogs": [],
+  "alerts": [],
+  "login": false,
+  "breadcrumb": false
+ }
+}

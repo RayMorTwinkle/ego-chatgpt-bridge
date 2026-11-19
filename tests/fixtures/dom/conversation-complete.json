@@ -1,0 +1,131 @@
+{
+ "kind": "conversation",
+ "url": "https://chatgpt.com/g/g-p-6aeb2a2310d88191bfd9c488bfc7f58f-ego-research-workspace/c/00000000-0000-0000-0000-000000000000",
+ "note": "sanitized from a live capture; structure and flags are real",
+ "state": {
+  "url": "https://chatgpt.com/g/g-p-6aeb2a2310d88191bfd9c488bfc7f58f-ego-research-workspace/c/00000000-0000-0000-0000-000000000000",
+  "title": "Sanitized canary fixture",
+  "turns": [
+   {
+    "assistant_markdown": "我已经把 ZIP 解压后按源码逐文件检查了 service.py / store.py / adapter.py / browser.mjs / page-state.mjs / server.py / oauth.py / artifacts.py / agent\\_view.py 以及主要测试。还做了 Python…",
+    "extraction": {
+     "scope": "visible_answer_dom",
+     "history_pagination_verified": false,
+     "truncation_status": "not_proven_absent",
+     "answer_anchor_count": 0,
+     "turn_anchor_count": 0,
+     "source_status": "no_sources_present",
+     "plain_text_characters": 15486,
+     "dom_inner_text_characters": 15507,
+     "table_count": 1,
+     "blocks": [
+      {
+       "index": 0,
+       "message_id": "ffffffffffffffffffffffffffffffffffff",
+       "characters": 15486
+      }
+     ]
+    },
+    "generation_active": false,
+    "render_error": null,
+    "state": "complete",
+    "user_id": "ffffffffffffffffffffffffffffffffffff",
+    "user_text": "附件 ego-bridge-src.zip 是项目 ego-chatgpt-bridge 的完整源码（Python 服务端 + Node 浏览器执行脚本 + 测试 + 文档）。背景：它把一台 Mac 上已登录的 ChatGPT 网页会话桥接给远端 AI Agent——研究任务进入 SQLite 队列，服务端用 ego-…",
+    "user_source_text": "附件 ego-bridge-src.zip 是项目 ego-chatgpt-bridge 的完整源码（Python 服务端 + Node 浏览器执行脚本 + 测试 + 文档）。背景：它把一台 Mac 上已登录的 ChatGPT 网页会话桥接给远端 AI Agent——研究任务进入 SQLite 队列，服务端用 ego-…",
+    "assistant_id": "ffffffffffffffffffffffffffffffffffff",
+    "assistant_text": "我已经把 ZIP 解压后按源码逐文件检查了 service.py / store.py / adapter.py / browser.mjs / page-state.mjs / server.py / oauth.py / artifacts.py / agent_view.py 以及主要测试。还做了 Python …",
+    "sources": [],
+    "external_images": [],
+    "render_ready": true,
+    "artifacts": [],
+    "unsupported_outputs": [],
+    "final_actions": true,
+    "regenerate": false,
+    "reader_diagnostics": {
+     "version": 4,
+     "pending_code": false,
+     "progress_images_ignored": 0,
+     "answer_roots": 1,
+     "reasoning_nodes_excluded": 0,
+     "user_controls_excluded": 14
+    }
+   },
+   {
+    "assistant_markdown": "可以。既然前三项小修已经落地，我会把未来 30 天压缩成 **“先堵公网可用性风险，再收敛重试，再处理公网注册资源”**，暂时不做大规模 DOM 重构。\n\n## 30 天最小落地计划\n\n| 顺序 | 时间 | 事项 | 为什么现在做 |\n| --- | --- | --- | --- |\n| **1** | Day 1…",
+    "extraction": {
+     "scope": "visible_answer_dom",
+     "history_pagination_verified": false,
+     "truncation_status": "not_proven_absent",
+     "answer_anchor_count": 0,
+     "turn_anchor_count": 0,
+     "source_status": "no_sources_present",
+     "plain_text_characters": 1621,
+     "dom_inner_text_characters": 1625,
+     "table_count": 1,
+     "blocks": [
+      {
+       "index": 0,
+       "message_id": "ffffffffffffffffffffffffffffffffffff",
+       "characters": 1621
+      }
+     ]
+    },
+    "generation_active": false,
+    "render_error": null,
+    "state": "complete",
+    "user_id": "ffffffffffffffffffffffffffffffffffff",
+    "user_text": "基于你上一轮的审查结论继续。假设维护者刚刚采纳了三项小修：观察内部异常收敛（OBSERVATION_INTERNAL_ERROR）、ask 去重纳入 context_mode、回执 nonce。请把剩下的建议整理成一个未来 30 天的最小落地计划：1) 排出前三件事的先后顺序和理由（从你提出的 BrowserSched…",
+    "user_source_text": "基于你上一轮的审查结论继续。假设维护者刚刚采纳了三项小修：观察内部异常收敛（OBSERVATION_INTERNAL_ERROR）、ask 去重纳入 context_mode、回执 nonce。请把剩下的建议整理成一个未来 30 天的最小落地计划：1) 排出前三件事的先后顺序和理由（从你提出的 BrowserSched…",
+    "assistant_id": "ffffffffffffffffffffffffffffffffffff",
+    "assistant_text": "可以。既然前三项小修已经落地，我会把未来 30 天压缩成 “先堵公网可用性风险，再收敛重试，再处理公网注册资源”，暂时不做大规模 DOM 重构。\n\n30 天最小落地计划\n\n顺序时间事项为什么现在做\n\n1Day 1–10BrowserScheduler当前最直接的公网 DoS / 饥饿风险；全局浏览器锁和 FIFO 队列…",
+    "sources": [],
+    "external_images": [],
+    "render_ready": true,
+    "artifacts": [],
+    "unsupported_outputs": [],
+    "final_actions": true,
+    "regenerate": false,
+    "reader_diagnostics": {
+     "version": 4,
+     "pending_code": false,
+     "progress_images_ignored": 0,
+     "answer_roots": 1,
+     "reasoning_nodes_excluded": 0,
+     "user_controls_excluded": 9
+    }
+   }
+  ],
+  "editor_present": true,
+  "draft": "",
+  "draft_has_autolinks": false,
+  "draft_attachments": [],
+  "draft_uploading": false,
+  "model_label": "推理強度\n極高",
+  "buttons": [
+   {
+    "label": "新增檔案和更多內容",
+    "testid": null,
+    "disabled": false
+   },
+   {
+    "label": "選取 ChatGPT 模型",
+    "testid": null,
+    "disabled": false
+   },
+   {
+    "label": "聽寫",
+    "testid": null,
+    "disabled": false
+   },
+   {
+    "label": "開始語音對話",
+    "testid": null,
+    "disabled": false
+   }
+  ],
+  "dialogs": [],
+  "alerts": [],
+  "login": false,
+  "breadcrumb": true
+ }
+}

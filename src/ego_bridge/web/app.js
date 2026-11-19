@@ -401,7 +401,17 @@ $('composer').addEventListener('submit',async event=>{
 /* ---------- Health ---------- */
 $('health').onclick=async()=>{
   const b=$('health'),dot=b.querySelector('.dot');b.disabled=true;$('health-status').textContent='正在检查服务端浏览器…';
-  try{const r=await tool('health_check');const ok=r.runtime?.healthy;dot.className='dot '+(ok?'ok':'warn');$('health-status').textContent=ok?'GPT-6 · 浏览器正常':'浏览器需要检查';}
+  try{
+    const r=await tool('health_check');const ok=r.runtime?.healthy;
+    const contract=r.runtime?.dom_contract;
+    const missing=contract?Object.keys(contract).filter(k=>!contract[k]):null;
+    const healthy=ok&&(!missing||!missing.length);
+    dot.className='dot '+(healthy?'ok':'warn');
+    $('health-status').textContent=healthy
+      ?'GPT-6 · 浏览器正常'+(contract?' · DOM 契约完整':'')
+      :ok&&missing&&missing.length?'GPT-6 正常，DOM 适配缺失：'+missing.join('、')
+      :'浏览器需要检查';
+  }
   catch(error){dot.className='dot warn';$('health-status').textContent=error.message;}
   finally{b.disabled=false;}
 };

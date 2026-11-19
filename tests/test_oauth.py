@@ -147,6 +147,32 @@ async def test_oauth_objects_are_garbage_collected_but_replay_rows_survive(oauth
         assert report['oauth_objects_removed']==0 and 'oauth' not in [e['area'] for e in report['errors']]
 
 
+async def test_dcr_client_capacity_is_reclaimed_by_gc(oauth):
+    async with oauth as (app,private,public):
+        provider=app.state.oauth;now=time.time()
+        def seed(cid,created):
+            provider.put('client',cid,dict(client_name=cid,redirect_uris=[],created_at=created))
+        # Unauthenticated junk that never completed authorization, older than a day.
+        seed('junk',int(now-2*86400))
+        # A long-dead client whose only grant expired more than 31 days ago.
+        seed('dead',int(now-40*86400))
+        provider.put('grant','g-dead',dict(owner='alice',fingerprint='x',client_id='dead',client_name='dead',
+            scopes=['research:read'],created_at=int(now-40*86400),expires_at=int(now-40*86400),revoked=False))
+        # A fresh never-authorized registration stays inside the grace window.
+        seed('pending',int(now))
+        # An active grant protects its client forever.
+        seed('fresh',int(now))
+        provider.put('grant','g-live',dict(owner='alice',fingerprint='x',client_id='fresh',client_name='fresh',
+            scopes=['research:read'],created_at=int(now),expires_at=int(now+30*86400),revoked=False))
+        assert provider.gc()>=2
+        assert provider.get('client','junk') is None
+        assert provider.get('client','dead') is None
+        assert provider.get('client','pending') is not None
+        assert provider.get('client','fresh') is not None
+        assert provider.get('grant','g-live') is not None
+        assert provider.gc()==0
+
+
 async def test_consent_csrf_scope_owner_and_revoke(oauth):
     async with oauth as (app,private,public):
         client,form=await grant(private,public,scopes='research:read',token='b'*40)

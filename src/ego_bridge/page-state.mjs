@@ -193,3 +193,38 @@ export function readChatPage() {
     login:!editor&&Array.from(document.querySelectorAll('button,a')).filter(visible).some(e=>/^(登入|登录|Log in|Sign in)$/.test(e.innerText.trim())),
     breadcrumb:Array.from(document.querySelectorAll('a[href]')).some(a=>a.getAttribute('href')?.endsWith('/project')&&visible(a))};
 }
+
+// The DOM adapter contract: which capabilities the reader can still extract from
+// a page. True values are positive evidence; a false value after a ChatGPT
+// redesign pinpoints which half of the adapter broke before any task is sent.
+// Pure function over readChatPage() output, shared by the node canary tests and
+// the health probe.
+export function domCapabilities(page) {
+  const turns=page?.turns??[];
+  const complete=turns.filter(t=>t.state==='complete');
+  const every=fn=>turns.length>0&&turns.every(fn);
+  return {
+    // Turn-level capabilities: only provable on snapshots that contain turns.
+    turns: turns.length>0,
+    turn_state: every(t=>typeof t.state==='string'&&t.state.length>0),
+    user_message_id: turns.some(t=>typeof t.user_id==='string'&&t.user_id.length>0),
+    assistant_message_id: complete.length===0||complete.every(t=>typeof t.assistant_id==='string'&&t.assistant_id.length>0),
+    user_text: every(t=>typeof t.user_text==='string'),
+    assistant_text: complete.length===0||complete.some(t=>typeof t.assistant_text==='string'),
+    answer_roots: every(t=>Number.isInteger(t.reader_diagnostics?.answer_roots)),
+    completion_signals: every(t=>typeof t.generation_active==='boolean'&&typeof t.render_ready==='boolean'
+      &&typeof t.final_actions==='boolean'&&typeof t.regenerate==='boolean'),
+    artifact_fields: every(t=>Array.isArray(t.artifacts)&&Array.isArray(t.unsupported_outputs)
+      &&Array.isArray(t.external_images)&&Array.isArray(t.sources)),
+    // Page-level capabilities: provable on any composer page, including an
+    // empty project input page.
+    editor: page?.editor_present===true,
+    send_button: Array.isArray(page?.buttons)&&page.buttons.length>0,
+    draft: typeof page?.draft==='string',
+    attachment_group: Array.isArray(page?.draft_attachments)&&typeof page?.draft_uploading==='boolean',
+    model_label: typeof page?.model_label==='string',
+    dialogs: Array.isArray(page?.dialogs)&&Array.isArray(page?.alerts),
+    login_detection: typeof page?.login==='boolean',
+    page_url: typeof page?.url==='string',
+  };
+}

@@ -461,7 +461,8 @@ async function main() {
       await probe.goto(input.project_url,{timeout:15000});await usable(probe);
       const s=await state(probe);check(s);
       const a=await account(probe);const m=await modelInfo(probe);await probe.keyboard.press('Escape');
-      return {...receipt,probe_scope:'dedicated_page',space_id:task.spaceId,project_id:s.identity.project,account:a,model_options:m,editor_present:s.editor_present,healthy:m.models.some(m=>m.label==='GPT-6'&&m.checked)};
+      return {...receipt,probe_scope:'dedicated_page',space_id:task.spaceId,project_id:s.identity.project,account:a,model_options:m,editor_present:s.editor_present,
+        dom_contract:domCapabilities(s),healthy:m.models.some(m=>m.label==='GPT-6'&&m.checked)};
     } finally {try{await probe.close();}catch{receipt.probe_cleanup_failed=true;}}
   }
   const page=await choosePage(task,['prepare','recover','capture_artifact'].includes(input.action));

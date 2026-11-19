@@ -75,7 +75,11 @@ class OAuthProvider:
             raise RegistrationError('invalid_client_metadata','Unsupported token authentication method')
         count = self.db.execute("SELECT count(*) FROM oauth_objects WHERE kind='client'").fetchone()[0]
         if count >= 1000: raise RegistrationError('invalid_client_metadata','Registration capacity reached; contact the administrator')
-        self.put('client',client_info.client_id,client_info.model_dump(mode='json'))
+        # created_at drives GC: unauthenticated DCR can otherwise fill the table
+        # permanently at the rate limit. Re-registration keeps the original age.
+        existing = self.get('client',client_info.client_id)
+        self.put('client',client_info.client_id,{**client_info.model_dump(mode='json'),
+            'created_at':(existing or {}).get('created_at') or int(time.time())})
 
     async def authorize(self, client, params: AuthorizationParams):
         if params.resource and params.resource != self.resource:
@@ -177,6 +181,29 @@ class OAuthProvider:
                     or (isinstance(expired, (int, float)) and expired <= horizon) \
                     or (value.get('revoked') and isinstance(created, (int, float)) and created <= horizon):
                 self.delete('grant', row[0]); removed += 1
+        # DCR is unauthenticated; without expiry the 1000-row capacity can be
+        # filled permanently at 10 registrations/minute. Never-authorized
+        # clients die after 24h, dead clients after 31d; active grants protect.
+        grants = {}
+        for row in self.db.execute("SELECT value FROM oauth_objects WHERE kind='grant'").fetchall():
+            try: grant = json.loads(row[0])
+            except (ValueError, TypeError): continue
+            if isinstance(grant, dict) and grant.get('client_id'):
+                grants.setdefault(grant['client_id'], []).append(grant)
+        for row in self.db.execute("SELECT key,value FROM oauth_objects WHERE kind='client'").fetchall():
+            try: value = json.loads(row[1])
+            except (ValueError, TypeError): value = None
+            if not isinstance(value, dict):
+                self.delete('client', row[0]); removed += 1; continue
+            created = value.get('created_at')
+            if not isinstance(created, (int, float)): created = 0
+            client_grants = grants.get(row[0], [])
+            active = any(isinstance(g, dict) and not g.get('revoked')
+                         and isinstance(g.get('expires_at'), (int, float)) and g['expires_at'] > at
+                         for g in client_grants)
+            if active: continue
+            if created <= horizon or (not client_grants and created <= at - 86400):
+                self.delete('client', row[0]); removed += 1
         return removed
 
     def grants(self, owner):

@@ -176,7 +176,13 @@ OUTCOME_UNKNOWN 会在 15 秒后、执行名额可用时自动调用 recover（�
 
 ### 观察节奏与执行成本
 
-每次浏览器动作都是一次独立的 `ego-browser nodejs` 子进程：Ego 冷启动、空间接管协商和页面读取都在该次超时预算内（只读动作下限 150 秒，submit 与带附件 prepare 为 180 秒，可在 config.json 用 browser_timeout 继续上调）。观察轮询是自适应的：正文、来源或产物在变时保持 `poll_seconds`（默认 4 秒）快节奏；内容安静且无待确认完成信号时退到 `quiet_poll_seconds`（默认 20 秒），已安排的自动重试始终把睡眠钳制在其到期时刻，不会因退避而迟到。
+每次浏览器动作都是一次独立的 `ego-browser nodejs` 子进程：Ego 冷启动、空间接管协商和页面读取都在该次超时预算内（只读动作下限 150 秒，submit 180 秒，带附件 prepare 300 秒，可在 config.json 用 browser_timeout 继续上调）。观察轮询是自适应的：正文、来源或产物在变时保持 `poll_seconds`（默认 4 秒）快节奏；内容安静且无待确认完成信号时退到 `quiet_poll_seconds`（默认 20 秒），已安排的自动重试始终把睡眠钳制在其到期时刻，不会因退避而迟到。
+
+### DOM 契约与金丝雀
+
+`page-state.mjs` 的 `domCapabilities()` 把读取器输出声明为 16 项能力契约（turns／turn_state／user_message_id／assistant_message_id／user_text／assistant_text／answer_roots／completion_signals／artifact_fields／editor／send_button／draft／attachment_group／model_label／dialogs／login_detection 等）。`health_check` 在探测页上随结果返回 `dom_contract`，WebUI 健康按钮显示缺失项；ChatGPT 改版后点一次健康检查即可知道**哪一半适配层断了**，而不是笼统的 UI_CHANGED。
+
+完整轮次能力需要真实对话页验证：停服务后运行 `ego-browser nodejs < scripts/capture_dom_snapshot.mjs`（脚本内路径常量需按机器调整），快照存入运行目录 `verification/dom-snapshots/`；`node --test tests/dom-canary.test.mjs`（设 `EGO_DOM_SNAPSHOTS` 检查运行库快照）对照 `tests/fixtures/dom/` 的脱敏金样本逐项断言。改版后的流程：采集新快照 → canary 红灯定位缺失能力 → 修 `page-state.mjs` → 重新采集并脱敏更新金样本。
 
 根治方向是 ego-browser 的 `--session` 常驻 runtime（同 id 顶层变量跨调用保留、单会话串行、超时或客户端被杀后下次自动重建，与桥的失败语义一致）。当前实测限制：`--session` 配合管道 stdin 时脚本会执行但输出不随本次调用返回（实测积压到会话结束才吐出），`-e` 模式下 `console.log` 同样不回显、仅以裸 JSON 返回最后表达式的值。桥的回执协议依赖调用结束时的 `EGO_BRIDGE_JSON:` 标签行，且超长提示词需要 stdin 管道传递，故暂不迁移；待 CLI 修复会话回传（或改用“最后表达式值”协议并解决 `-e` 参数长度）后，可将空间接管结果缓存在会话内，消除每次轮询的进程与协商成本。
 

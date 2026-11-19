@@ -30,7 +30,7 @@ class EgoAdapter:
 
     @staticmethod
     def script_source():
-        helper=Path(__file__).with_name('page-state.mjs').read_text().replace('export function readChatPage','function readChatPage')
+        helper=Path(__file__).with_name('page-state.mjs').read_text().replace('export function readChatPage','function readChatPage').replace('export function domCapabilities','function domCapabilities')
         return helper+'\n'+Path(__file__).with_name('browser.mjs').read_text()
 
     def close(self):

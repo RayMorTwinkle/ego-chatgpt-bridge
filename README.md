@@ -152,6 +152,8 @@ HTTPS 是可选部署方式：主动设置 `tls_enabled=true` 后运行 `renew-t
 策略可在 `config.json` 调整，修改后重启；现有文件的到期时间固定记录，新采集采用新配置。`diagnose` 返回保留策略和最近清理结果，运行目录 `retention.json` 保存清理回执。`.env`、TLS密钥和对话文字不会因文件轮换而删除。
 
 
+v0.5.6：DOM 适配契约化——`page-state.mjs` 新增 `domCapabilities()` 能力契约（16 项），`health_check` 返回 `dom_contract`、WebUI 健康按钮直接显示缺失能力项；真实对话金丝雀快照 + canary 测试（`tests/dom-canary.test.mjs` + 脱敏金样本 + `scripts/capture_dom_snapshot.mjs` 采集器），ChatGPT 改版后能精确指出哪半适配层失效。DCR 客户端注册增加生命周期回收（未授权 24h、死授权 31d、活动授权永久保留），匿名注册不再能永久填满注册容量。
+
 v0.5.5：附件发送就绪等待改为 `page.evaluate` 主动轮询——Ego 的 `waitForFunction` 观察不到已有按钮的 disabled 属性翻转，导致附件永远停在就绪等待；实测上传 3-6 秒即就绪，附件功能首次端到端可用。带附件 prepare 预算提高到 300 秒；`retry_query` 重置自动重试预算（保留历史）。采纳外部架构审查（GPT-6 通读全部源码并以最小 harness 复现）的三项：观察/对账内部异常收敛为 `OBSERVATION_INTERNAL_ERROR`，消除永久 active 活锁与执行名额泄漏；`ask` 自动去重纳入 `context_mode`，不同上下文约束不再错误合并为同一任务；浏览器回施行加每次调用 nonce，防页面脚本伪造回执。
 
 v0.5.4：修复所有附件发送必然失败的问题——附件挂载后的可发送判定改用与实际点击同源的标准（`data-testid` 优先），并等待 ChatGPT 处理新附件期间发送按钮重新可用（最多 60 秒）；失败时 diagnostic_context 附带可见发送按钮与告警证据。此前纯文本正常、附件路径因两套发送按钮标准漂移而全部停在 ATTACHMENT_UPLOAD_INCOMPLETE。
